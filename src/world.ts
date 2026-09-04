@@ -1,5 +1,6 @@
 import * as T from 'three';
 import { CollisionWorld } from './physics';
+import { createIslandTerrain } from './island-terrain';
 import { CELL, generateLayout, seededRandom, blastDamage, blastImpulse, islandRadius } from './model.js';
 
 const dummy = new T.Object3D();
@@ -138,9 +139,8 @@ export class City {
       const x = Math.cos(a) * distance, z = Math.sin(a) * distance;
       const edge = islandRadius(a + Math.PI, radius, i), dock = new T.Vector3(x - Math.cos(a) * (edge + 28), 0, z - Math.sin(a) * (edge + 28));
       this.islands.push({ x, z, radius, phase: i, name: names[i], dock });
-      const shore = new T.Mesh(new T.CylinderGeometry(radius, radius + 12, 10, 64), new T.MeshStandardMaterial({ color: '#c6b88c', roughness: 1 })); const shoreVertices = shore.geometry.attributes.position; for (let k = 0; k < shoreVertices.count; k++) { const vx = shoreVertices.getX(k), vz = shoreVertices.getZ(k), f = islandRadius(Math.atan2(vz, vx), 1, i); shoreVertices.setX(k, vx * f); shoreVertices.setZ(k, vz * f); } shore.geometry.computeVertexNormals(); shore.position.set(x, -4.3, z); this.group.add(shore);
-      const lawn = new T.Mesh(new T.CircleGeometry(radius - 14, 64), new T.MeshStandardMaterial({ color: '#71946a', roughness: 1 })); const lawnVertices = lawn.geometry.attributes.position; for (let k = 0; k < lawnVertices.count; k++) { const vx = lawnVertices.getX(k), vy = lawnVertices.getY(k), f = islandRadius(Math.atan2(-vy, vx), 1, i); lawnVertices.setX(k, vx * f); lawnVertices.setY(k, vy * f); } lawn.rotation.x = -Math.PI / 2; lawn.position.set(x, .73, z); this.group.add(lawn);
-      this.solid.add(x, .79, z, radius * 1.5, .1, 9, '#a79e84'); this.solid.add(x, .79, z, 9, .1, radius * 1.5, '#a79e84');
+      const terrain = createIslandTerrain(radius, i);
+      terrain.position.set(x, 0, z); this.group.add(terrain);
       const pier = new T.Mesh(new T.BoxGeometry(52, 2, 9), new T.MeshStandardMaterial({ color: '#a58c6a' })); pier.position.set(dock.x + Math.cos(a) * 38, .1, dock.z + Math.sin(a) * 38); pier.rotation.y = -a; this.group.add(pier);
       this.terrainRects.push({ x: pier.position.x, z: pier.position.z, width: Math.abs(Math.cos(a)) * 52 + 9, depth: Math.abs(Math.sin(a)) * 52 + 9, y: 1.1 });
       for (let j = 0; j < 18; j++) {
