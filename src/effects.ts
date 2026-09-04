@@ -2,6 +2,7 @@ import * as T from 'three';
 import { Batch, City, type Building, type Citizen, type Hit } from './world';
 import { blastImpulse } from './model.js';
 import { Sound } from './audio';
+import { advanceBody, type Motion, type Impact } from './physics';
 
 export const DISASTERS = [
   { id: 'meteor', name: 'Метеорит', sub: 'Привет из космоса', icon: 'meteor', color: '#ffa46d', radius: 105, category: 'space' },
@@ -16,45 +17,61 @@ export const DISASTERS = [
   { id: 'volcano', name: 'Вулкан', sub: 'Горячий сосед', icon: 'mountain', color: '#ff8962', radius: 140, category: 'nature' },
   { id: 'ufo', name: 'НЛО', sub: 'Мы пришли с миром', icon: 'ufo', color: '#aaf3bd', radius: 100, category: 'space' },
   { id: 'blackhole', name: 'Чёрная дыра', sub: 'Последний аргумент', icon: 'orbit', color: '#c3a3fa', radius: 170, category: 'space' },
+  { id: 'squad_assault', name: 'Штурмовики', sub: '6 бойцов · универсалы', icon: 'people', color: '#83c4df', radius: 18, category: 'troops' },
+  { id: 'squad_heavy', name: 'Тяжёлый отряд', sub: '4 бойца · броня и огонь', icon: 'crosshair', color: '#e6c265', radius: 18, category: 'troops' },
+  { id: 'squad_scout', name: 'Разведчики', sub: '5 бойцов · скорость и дальность', icon: 'pointer', color: '#9bc695', radius: 18, category: 'troops' },
 ] as const;
 export type DisasterId = typeof DISASTERS[number]['id'];
-type Particle = { x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number; max: number; size: number; color: T.Color; };
+type Particle = { x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number; max: number; delay: number; size: number; color: T.Color; };
 class Particles {
   mesh: T.Points; items: Particle[] = []; cursor = 0; positions: Float32Array; colors: Float32Array; sizes: Float32Array; alphas: Float32Array; material: T.ShaderMaterial;
   constructor(scene: T.Scene, public capacity: number, public smoke: boolean, public gravity = smoke ? 0 : 9) {
     const geo = new T.BufferGeometry(); this.positions = new Float32Array(capacity * 3); this.colors = new Float32Array(capacity * 3); this.sizes = new Float32Array(capacity); this.alphas = new Float32Array(capacity);
     geo.setAttribute('position', new T.BufferAttribute(this.positions, 3).setUsage(T.DynamicDrawUsage)); geo.setAttribute('aColor', new T.BufferAttribute(this.colors, 3).setUsage(T.DynamicDrawUsage)); geo.setAttribute('aSize', new T.BufferAttribute(this.sizes, 1).setUsage(T.DynamicDrawUsage)); geo.setAttribute('aAlpha', new T.BufferAttribute(this.alphas, 1).setUsage(T.DynamicDrawUsage));
     this.material = new T.ShaderMaterial({ transparent: true, depthWrite: false, blending: smoke ? T.NormalBlending : T.AdditiveBlending, uniforms: { uScale: { value: 700 }, uSmoke: { value: smoke ? 1 : 0 } },
-      vertexShader: `attribute vec3 aColor; attribute float aSize; attribute float aAlpha; varying vec3 vColor; varying float vAlpha; uniform float uScale; void main(){vColor=aColor;vAlpha=aAlpha;vec4 mv=modelViewMatrix*vec4(position,1.);gl_PointSize=clamp(aSize*uScale/-mv.z,0.,200.);gl_Position=projectionMatrix*mv;}`,
-      fragmentShader: `varying vec3 vColor; varying float vAlpha; uniform float uSmoke; void main(){float r=length(gl_PointCoord-.5)*2.;if(r>1.)discard;float a=pow(1.-r,uSmoke>.5?1.5:2.);gl_FragColor=vec4(vColor,a*vAlpha);}` });
+      vertexShader: `attribute vec3 aColor; attribute float aSize; attribute float aAlpha; varying vec3 vColor; varying float vAlpha; uniform float uScale; void main(){vColor=aColor;vAlpha=aAlpha;vec4 mv=modelViewMatrix*vec4(position,1.);gl_PointSize=clamp(aSize*uScale/-mv.z,0.,128.);gl_Position=projectionMatrix*mv;}`,
+      fragmentShader: `varying vec3 vColor; varying float vAlpha; uniform float uSmoke; void main(){vec2 uv=(gl_PointCoord-.5)*2.;float edge=sin(uv.x*11.+uv.y*9.)*sin(uv.y*13.-uv.x*8.)*.075;float r=length(uv)+edge;if(r>1.)discard;float a=pow(max(0.,1.-r),uSmoke>.5?1.25:1.8);gl_FragColor=vec4(vColor,a*vAlpha);}` });
     this.mesh = new T.Points(geo, this.material); this.mesh.frustumCulled = false; this.mesh.renderOrder = smoke ? 3 : 4; scene.add(this.mesh);
   }
-  emit(x: number, y: number, z: number, vx: number, vy: number, vz: number, size: number, life: number, color: T.ColorRepresentation) {
-    const i = this.cursor++ % this.capacity; this.items[i] = { x, y, z, vx, vy, vz, size, life, max: life, color: new T.Color(color) };
+  emit(x: number, y: number, z: number, vx: number, vy: number, vz: number, size: number, life: number, color: T.ColorRepresentation, delay = 0) {
+    const i = this.cursor++ % this.capacity; this.items[i] = { x, y, z, vx, vy, vz, size, life, max: life, delay, color: new T.Color(color) };
   }
   update(dt: number) {
     for (let i = 0; i < this.items.length; i++) {
       const p = this.items[i]; if (!p || p.life <= 0) { this.alphas[i] = 0; this.sizes[i] = 0; continue; }
+      if (p.delay > 0) { p.delay -= dt; this.alphas[i] = this.sizes[i] = 0; continue; }
       p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt; p.vx *= Math.exp(-dt * .35); p.vz *= Math.exp(-dt * .35); p.vy -= dt * this.gravity;
-      const f = Math.max(0, p.life / p.max); this.positions.set([p.x, p.y, p.z], i * 3); this.colors.set([p.color.r, p.color.g, p.color.b], i * 3); this.sizes[i] = p.size * (this.smoke ? 2 - f : .4 + f); this.alphas[i] = f * (this.smoke ? .8 : 1);
+      const f = Math.max(0, p.life / p.max), age = p.max - p.life, fadeIn = T.MathUtils.smoothstep(age, 0, Math.min(.16, p.max * .16)); this.positions.set([p.x, p.y, p.z], i * 3); const cooling = this.smoke ? 1 : .45 + .55 * f; this.colors.set([p.color.r, p.color.g * cooling, p.color.b * cooling * cooling], i * 3); this.sizes[i] = p.size * (this.smoke ? 1.2 + (1 - f) * 1.8 : .4 + Math.sin(Math.PI * (1 - f)) * .85) * (.35 + fadeIn * .65); this.alphas[i] = fadeIn * Math.pow(f, this.smoke ? .7 : 1.2) * (this.smoke ? .65 : .95);
     }
     for (const key of ['position', 'aColor', 'aSize', 'aAlpha']) this.mesh.geometry.attributes[key].needsUpdate = true;
   }
   clear() { this.items = []; this.alphas.fill(0); this.sizes.fill(0); this.cursor = 0; this.update(0); }
 }
-type Debris = { id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; rz: number; spin: number; sx: number; sy: number; sz: number; life: number; waveId?: number; };
-type ThrownActor = { source: Citizen; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; ry: number; rz: number; spin: number; age: number; landed: boolean; limbs?: number[]; waveId?: number; };
-type Event = { type: DisasterId | 'bolt' | 'ring'; x: number; z: number; age: number; duration: number; power: number; group: T.Group; tick: number; data: Record<string, any>; };
+type Debris = Motion & { id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; rz: number; spin: number; sx: number; sy: number; sz: number; life: number; waveId?: number; };
+type ThrownActor = Motion & { source: Citizen; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; ry: number; rz: number; spin: number; age: number; landed: boolean; limbs?: number[]; waveId?: number; };
+type Event = { type: DisasterId | 'bolt' | 'ring' | 'plume'; x: number; z: number; age: number; duration: number; power: number; group: T.Group; tick: number; data: Record<string, any>; };
 export class Effects {
   fire: Particles; smoke: Particles; debrisBatch: Batch; debris: Debris[] = []; debrisCursor = 0; events: Event[] = [];
   blood: Particles; splats: Batch; limbs: Batch; splatCursor = 0; bloodEnabled = true;
   wrecks: ThrownActor[] = []; bodies: ThrownActor[] = []; secondaryBlasts: { x: number; z: number; delay: number }[] = [];
+  sprayWater: Particles; rippleBatch: Batch; ripples: { id: number; x: number; y: number; z: number; age: number; size: number }[] = []; rippleCursor = 0; rippleOpacity = new Float32Array(180);
+  waterImpacts = 0; solidImpacts = 0; buildingImpacts = 0; aircraftDestroyed = 0; impactSoundCooldown = 0;
+  onDeploy: (kind: string, x: number, z: number) => boolean = () => false;
   carExplosions = 0; deaths = 0; waveCounter = 0; carSoundCooldown = 0;
   shake = 0; flash = 0; flood = 0; executed = 0; power = 1; destroyedAtStart = 0;
   onEvent: (name: string, message: string) => void = () => {};
   constructor(public scene: T.Scene, public city: City, public sound: Sound) {
     this.fire = new Particles(scene, 5500, false); this.smoke = new Particles(scene, 2800, true);
     this.blood = new Particles(scene, 2400, true, 28);
+    this.sprayWater = new Particles(scene, 3000, true, 24);
+    const ringGeometry = new T.RingGeometry(.84, 1, 40); ringGeometry.rotateX(-Math.PI / 2);
+    ringGeometry.setAttribute('aOpacity', new T.InstancedBufferAttribute(this.rippleOpacity, 1).setUsage(T.DynamicDrawUsage));
+    const rippleMaterial = new T.MeshBasicMaterial({ color: '#b7e2df', transparent: true, opacity: .4, depthWrite: false });
+    rippleMaterial.onBeforeCompile = shader => {
+      shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nattribute float aOpacity; varying float vRippleAlpha;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvRippleAlpha=aOpacity;');
+      shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vRippleAlpha;').replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.a*=vRippleAlpha;');
+    };
+    this.rippleBatch = new Batch(scene, ringGeometry, rippleMaterial, 180, false);
     const stain = new T.CircleGeometry(1, 12); stain.rotateX(-Math.PI / 2);
     const vertices = stain.attributes.position;
     for (let i = 1; i < vertices.count; i++) { const factor = .78 + Math.sin(i * 12.3) * .2; vertices.setX(i, vertices.getX(i) * factor); vertices.setZ(i, vertices.getZ(i) * factor); }
@@ -63,13 +80,38 @@ export class Effects {
     this.debrisBatch = new Batch(scene, new T.BoxGeometry(1, 1, 1), new T.MeshStandardMaterial({ roughness: .85 }), 2200); this.attachCity(city);
   }
   attachCity(city: City) {
-    this.city = city; city.onCollapse = b => this.collapse(b); city.onFire = b => this.burn(b);
+    this.city = city; city.onPlaneDestroyed = (plane, hit) => this.breakAircraft(plane, hit); city.onCollapse = b => this.collapse(b); city.onFire = b => this.burn(b);
     city.onCarExplosion = (car, hit) => this.explodeCar(car, hit); city.onDeath = (person, hit) => this.killPerson(person, hit);
     city.onWreck = (x, y, z, color, hit) => {
       const kick = this.kick(x, z, hit);
       for (let i = 0; i < 7; i++) this.chunk(x, y, z, 1 + Math.random() * 3, 1, 2 + Math.random() * 3, kick.vx + (Math.random() - .5) * 12, kick.vy + 5 + Math.random() * 12, kick.vz + (Math.random() - .5) * 12, color, hit?.waveId);
       this.smoke.emit(x, y, z, kick.vx * .3, 10, kick.vz * .3, 17, 4, '#65706d');
     };
+  }
+  breakAircraft(plane: T.Group, hit: Hit) {
+    this.aircraftDestroyed++; const velocity = plane.userData.velocity as T.Vector3;
+    plane.updateWorldMatrix(true, true);
+    for (const child of plane.children) if (child instanceof T.Mesh) {
+      child.geometry.computeBoundingBox(); const size = child.geometry.boundingBox!.getSize(new T.Vector3()); const position = child.getWorldPosition(new T.Vector3());
+      const kick = this.kick(position.x, position.z, { ...hit, impulse: true }, .8);
+      const pieces = child === plane.children[0] ? 7 : 3;
+      for (let i = 0; i < pieces; i++) this.chunk(position.x + (Math.random() - .5) * 12, position.y + (Math.random() - .5) * 3, position.z + (Math.random() - .5) * 8, Math.min(8, Math.max(.7, size.x / pieces)), .6 + Math.random(), Math.min(6, Math.max(2, size.z / pieces)), velocity.x + kick.vx * .45 + (Math.random() - .5) * 20, 8 + Math.random() * 26, velocity.z + kick.vz * .45 + (Math.random() - .5) * 20, '#b7c1b7', hit.waveId);
+    }
+    for (let i = 0; i < 55; i++) { const a = Math.random() * Math.PI * 2, speed = 5 + Math.random() * 35; this.fire.emit(plane.position.x, plane.position.y, plane.position.z, Math.cos(a) * speed + velocity.x, Math.random() * 30, Math.sin(a) * speed + velocity.z, 6 + Math.random() * 12, .6 + Math.random() * 1.8, '#ffb758', Math.random() * .14); this.smoke.emit(plane.position.x, plane.position.y, plane.position.z, velocity.x * .5, 5 + Math.random() * 15, velocity.z * .5, 9 + Math.random() * 14, 2 + Math.random() * 3, '#485457', i * .015); }
+    this.sound.impact(.7);
+  }
+  impact(hit: Impact) {
+    if (hit.water) {
+      this.waterImpacts++; const energy = Math.min(55, 5 + Math.sqrt(hit.speed) * hit.size * 1.7);
+      for (let i = 0; i < Math.min(65, 15 + energy); i++) { const a = Math.random() * Math.PI * 2, v = 3 + Math.random() * energy * .6; this.sprayWater.emit(hit.x + Math.cos(a) * hit.size, hit.y + .3, hit.z + Math.sin(a) * hit.size, Math.cos(a) * v, 5 + Math.random() * energy * .9, Math.sin(a) * v, 1 + Math.random() * 3.5, .7 + Math.random() * 1.5, i % 3 ? '#b5e1df' : '#70b4c3'); }
+      const id = this.rippleCursor++ % 180; if (id >= this.rippleBatch.used) this.rippleBatch.add(hit.x, hit.y + .18, hit.z, 1, 1, 1, '#b7e2df');
+      this.ripples[id] = { id, x: hit.x, y: hit.y + .18, z: hit.z, age: 0, size: Math.min(25, 4 + energy * .45) };
+    } else {
+      this.solidImpacts++; if (hit.building) { this.buildingImpacts++; if (hit.building.health > 0) this.city.damageBuilding(hit.building, Math.min(24, hit.speed * hit.size * .055)); }
+      const count = Math.min(22, 4 + Math.floor(hit.speed * .25));
+      for (let i = 0; i < count; i++) { const a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 11; this.smoke.emit(hit.x, hit.y + .6, hit.z, Math.cos(a) * v, 2 + Math.random() * 6, Math.sin(a) * v, 2 + hit.size * 1.1 + Math.random() * 3, .4 + Math.random() * 1.2, '#a69e87'); if (i % 3 === 0) this.fire.emit(hit.x, hit.y + .4, hit.z, Math.cos(a) * v * 1.5, 4 + Math.random() * 10, Math.sin(a) * v * 1.5, .45 + Math.random(), .18 + Math.random() * .35, '#ffc778'); }
+    }
+    if (hit.speed > 20 && this.impactSoundCooldown <= 0) { this.sound.impact(Math.min(.5, hit.speed * hit.size / 240)); this.impactSoundCooldown = .15; }
   }
   kick(x: number, z: number, hit?: Hit, mass = 1) { return hit?.impulse ? blastImpulse(x, z, hit.x, hit.z, hit.radius, hit.strength, mass) : { vx: 0, vy: 5, vz: 0 }; }
   actor(source: Citizen, hit: Hit, mass: number): ThrownActor { return { source, x: source.x, y: 1.4, z: source.z, ...this.kick(source.x, source.z, hit, mass), rx: 0, ry: source.axis ? Math.PI / 2 : 0, rz: 0, spin: (Math.random() - .5) * 7, age: 0, landed: false, waveId: hit.waveId }; }
@@ -80,7 +122,7 @@ export class Effects {
     for (let i = 0; i < 7; i++) this.chunk(car.x, 2, car.z, .5 + Math.random(), .25, .7 + Math.random(), wreck.vx + (Math.random() - .5) * 22, wreck.vy + Math.random() * 14, wreck.vz + (Math.random() - .5) * 22, i % 2 ? '#444b4b' : '#a89369', hit.waveId);
   }
   splatter(x: number, z: number, size: number) {
-    if (!this.bloodEnabled) return; const id = this.splatCursor++ % 2600, color = this.splatCursor % 3 ? '#87121d' : '#b71b29';
+    if (!this.bloodEnabled || this.city.terrainHeight(x, z) === null) return; const id = this.splatCursor++ % 2600, color = this.splatCursor % 3 ? '#87121d' : '#b71b29';
     if (id >= this.splats.used) this.splats.add(x, .84, z, size, 1, size * .72, color, Math.random() * 6.28); else { this.splats.set(id, x, .84, z, size, 1, size * .72, Math.random() * 6.28); this.splats.color(id, color); }
   }
   spray(x: number, y: number, z: number, vx: number, vz: number, count = 20) {
@@ -95,21 +137,23 @@ export class Effects {
     for (let i = 0; i < 5; i++) { const a = Math.random() * 6.28, r = Math.random() * 3; this.splatter(person.x + Math.cos(a) * r, person.z + Math.sin(a) * r, .2 + Math.random() * .5); }
   }
   burn(b: Building) {
-    const y = b.collapsed ? 3 : b.height * .4;
-    this.smoke.emit(b.x + (Math.random() - .5) * 12, y + 8, b.z, 4, 15, 1, 25, 6, '#465158');
-    for (let i = 0; i < 3; i++) this.fire.emit(b.x + (Math.random() - .5) * b.width, y, b.z + (Math.random() - .5) * b.depth, 0, 12 + Math.random() * 8, 0, 12, 1.4, i % 2 ? '#ffb142' : '#ff5022');
+    const side = Math.random() < .5 ? -1 : 1;
+    const x = b.x + side * b.width * .51, z = b.z + (Math.random() - .5) * b.depth;
+    const y = b.collapsed ? 1.8 : 1.8 + Math.random() * Math.min(15, b.height * .35);
+    this.smoke.emit(x, y + 3, z, 2 + Math.random() * 3, 6 + Math.random() * 7, .5, 5 + Math.random() * 6, 2 + Math.random() * 2, '#495153');
+    for (let i = 0; i < 3; i++) this.fire.emit(x + (Math.random() - .5) * 3, y, z + (Math.random() - .5) * 3, side * (.5 + Math.random()), 7 + Math.random() * 12, (Math.random() - .5) * 3, 4 + Math.random() * 7, .7 + Math.random() * 1.3, i % 2 ? '#ffb142' : '#ff6122');
   }
   chunk(x: number, y: number, z: number, sx: number, sy: number, sz: number, vx: number, vy: number, vz: number, color: T.ColorRepresentation, waveId?: number) {
     const id = this.debrisCursor++ % 2200;
     if (id >= this.debrisBatch.used) this.debrisBatch.add(x, y, z, sx, sy, sz, color); else this.debrisBatch.color(id, color);
-    this.debris[id] = { id, x, y, z, sx, sy, sz, vx, vy, vz, rx: 0, rz: 0, spin: (Math.random() - .5) * 4, life: 22, waveId };
+    this.debris[id] = { id, x, y, z, sx, sy, sz, vx, vy, vz, rx: Math.random() * 3, rz: Math.random() * 3, spin: (Math.random() - .5) * 9 / Math.sqrt(Math.max(1, sx * sy)), life: 22, waveId };
   }
   collapse(b: Building) {
     const n = Math.min(40, 9 + Math.floor(b.height / 4));
     const kick = b.blast ? blastImpulse(b.x, b.z, b.blast.x, b.blast.z, b.blast.radius + b.width, b.blast.strength) : { vx: 0, vy: 0, vz: 0 };
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2, force = b.blast ? 5 : 7 + Math.random() * 30;
-      this.chunk(b.x + (Math.random() - .5) * b.width, Math.random() * b.height + 4, b.z + (Math.random() - .5) * b.depth, 2 + Math.random() * 5, 1 + Math.random() * 3, 2 + Math.random() * 5, kick.vx + Math.cos(a) * force, kick.vy + 6 + Math.random() * 16, kick.vz + Math.sin(a) * force, b.color.clone().multiplyScalar(.7), b.blast?.waveId);
+      this.chunk(b.x + (Math.random() - .5) * b.width, Math.random() * b.height + 4, b.z + (Math.random() - .5) * b.depth, 2 + Math.random() * 5, 1 + Math.random() * 3, 2 + Math.random() * 5, kick.vx * (.5 + Math.random() * 1.15) + Math.cos(a) * force, kick.vy * (.35 + Math.random()) + 6 + Math.random() * 30, kick.vz * (.5 + Math.random() * 1.15) + Math.sin(a) * force, b.color.clone().multiplyScalar(.7), b.blast?.waveId);
     }
     for (let i = 0; i < 8; i++) this.smoke.emit(b.x + (Math.random() - .5) * b.width, 8 + Math.random() * b.height * .5, b.z + (Math.random() - .5) * b.depth, (Math.random() - .5) * 22, 9, (Math.random() - .5) * 22, 30, 4 + Math.random() * 3, '#818078');
     this.shake = Math.max(this.shake, .4); this.city.miniMapDirty = true;
@@ -117,11 +161,13 @@ export class Effects {
   explosion(x: number, z: number, radius: number, power: number, fire = true, secondary = false) {
     if (!secondary || this.carSoundCooldown <= 0) { this.sound.impact(radius / 75); this.carSoundCooldown = .12; }
     this.shake = Math.max(this.shake, radius / 80); this.flash = Math.max(this.flash, Math.min(.7, radius / 400));
-    for (let i = 0; i < Math.min(160, radius); i++) {
-      const a = Math.random() * Math.PI * 2, speed = Math.random() * radius * 1.3, y = Math.random() * radius * .3;
-      this.fire.emit(x, y + 3, z, Math.cos(a) * speed, Math.random() * radius * 1.2, Math.sin(a) * speed, 10 + Math.random() * 22, .7 + Math.random() * 2.3, i % 3 ? '#ff9e36' : '#fff0b6');
-      if (i % 3 === 0) this.smoke.emit(x + (Math.random() - .5) * 25, y + 8, z + (Math.random() - .5) * 25, Math.cos(a) * speed * .4, 12 + Math.random() * 25, Math.sin(a) * speed * .4, 25 + Math.random() * 35, 4 + Math.random() * 5, '#5e5e56');
+    const lobes = Array.from({ length: 9 }, () => ({ angle: Math.random() * Math.PI * 2, force: .3 + Math.random() * .85, lift: .2 + Math.random() }));
+    for (let i = 0; i < Math.min(180, radius * 1.4); i++) {
+      const lobe = lobes[i % lobes.length], a = lobe.angle + (Math.random() - .5) * .28, velocity = (8 + Math.pow(Math.random(), 2) * radius * .85) * lobe.force;
+      this.fire.emit(x + (Math.random() - .5) * 8, 2 + Math.random() * 5, z + (Math.random() - .5) * 8, Math.cos(a) * velocity, (12 + Math.random() * radius * .7) * lobe.lift, Math.sin(a) * velocity, 5 + Math.random() * 18, .5 + Math.random() * 2.3, i % 4 ? '#ff9e36' : '#ffe4a6', Math.random() * .2);
+      if (i % 3 === 0) this.smoke.emit(x, 4 + Math.random() * 6, z, Math.cos(a) * velocity * .3, 8 + Math.random() * 19, Math.sin(a) * velocity * .3, 7 + Math.random() * 19, 2 + Math.random() * 5, '#605e53', .1 + Math.random() * .65);
     }
+    if (radius > 30) { const plume = this.event('plume', x, z, radius > 150 ? 10 : 5, 1); plume.data.radius = radius; }
     const ring = this.event('ring', x, z, .45 + radius / 170, power); ring.data = { radius, previous: -1, fire, waveId: ++this.waveCounter, pushed: new Set<object>() };
     const mesh = new T.Mesh(new T.RingGeometry(.945, 1, 100), new T.MeshBasicMaterial({ color: '#ffe8c6', transparent: true, opacity: .85, side: T.DoubleSide, depthWrite: false, blending: T.AdditiveBlending })); mesh.rotation.x = -Math.PI / 2; mesh.position.y = 1.1; ring.group.add(mesh);
     const dome = new T.Mesh(new T.SphereGeometry(1, 40, 20, 0, Math.PI * 2, 0, Math.PI / 2), new T.ShaderMaterial({ transparent: true, depthWrite: false, side: T.DoubleSide, blending: T.AdditiveBlending, uniforms: { opacity: { value: .3 } }, vertexShader: 'varying vec3 vNormal;varying vec3 vView;void main(){vec4 p=modelViewMatrix*vec4(position,1.);vNormal=normalize(normalMatrix*normal);vView=normalize(-p.xyz);gl_Position=projectionMatrix*p;}', fragmentShader: 'varying vec3 vNormal;varying vec3 vView;uniform float opacity;void main(){float rim=pow(1.-abs(dot(normalize(vNormal),normalize(vView))),3.);gl_FragColor=vec4(1.,.85,.62,rim*opacity);}' })); ring.group.add(dome);
@@ -131,9 +177,10 @@ export class Effects {
     const e: Event = { type, x, z, duration, power, group, age: 0, tick: 0, data: {} }; this.events.push(e); return e;
   }
   trigger(type: DisasterId, x: number, z: number, multiplier = this.power, announce = true) {
-    if (this.events.filter(e => e.type !== 'ring' && e.type !== 'bolt').length >= 28) { this.onEvent('Слишком много событий', 'Дождитесь завершения части катастроф'); return false; }
+    if (this.events.filter(e => e.type !== 'ring' && e.type !== 'bolt' && e.type !== 'plume').length >= 28) { this.onEvent('Слишком много событий', 'Дождитесь завершения части катастроф'); return false; }
     const d = DISASTERS.find(d => d.id === type)!; if (announce) { this.executed++; this.onEvent(d.name, d.sub); }
     const p = multiplier;
+    if (type.startsWith('squad_')) return this.onDeploy(type.slice(6), x, z);
     if (type === 'bomb' || type === 'meteor' || type === 'nuke') {
       const e = this.event(type, x, z, type === 'meteor' ? 2 : 1.5, p);
       const mesh = new T.Mesh(type === 'meteor' ? new T.IcosahedronGeometry(8 * Math.sqrt(p), 1) : new T.CapsuleGeometry(type === 'nuke' ? 4 : 2, 8, 3, 8), new T.MeshStandardMaterial({ color: type === 'meteor' ? '#623421' : '#4d5653', emissive: type === 'meteor' ? '#e6430c' : '#000000', emissiveIntensity: 1.8, roughness: .9 })); e.group.add(mesh);
@@ -194,10 +241,10 @@ export class Effects {
     const hit: Hit = { x: e.x, z: e.z, radius: e.data.radius, strength: e.power, fire: e.data.fire, impulse: true, waveId: e.data.waveId, front: { previous: e.data.previous, current: radius } };
     this.city.hit(hit);
     for (const object of [...this.debris, ...this.wrecks, ...this.bodies]) {
-      if (!object || object.waveId === e.data.waveId || e.data.pushed.has(object)) continue;
+      if (!object || object.removed || object.submerged || object.waveId === e.data.waveId || e.data.pushed.has(object)) continue;
       if (Math.hypot(object.x - e.x, object.z - e.z) > radius || object.y > e.data.radius * 1.3) continue;
       const kick = this.kick(object.x, object.z, hit); object.vx += kick.vx; object.vy += kick.vy; object.vz += kick.vz;
-      if ('life' in object) object.life = 12; else { object.landed = false; object.age = Math.min(object.age, 20); }
+      object.resting = false; if ('life' in object) object.life = 12; else { object.landed = false; object.age = Math.min(object.age, 20); }
       e.data.pushed.add(object);
     }
     e.data.previous = radius;
@@ -213,18 +260,14 @@ export class Effects {
     const rotation = new T.Euler(), offset = new T.Vector3();
     for (const actor of [...this.wrecks, ...this.bodies]) {
       const body = !!actor.limbs; actor.age += dt;
-      if (actor.age < 45) {
-        actor.vy -= 28 * dt; actor.x += actor.vx * dt; actor.y += actor.vy * dt; actor.z += actor.vz * dt;
-        actor.rx += actor.spin * dt; actor.rz += actor.spin * dt * .4;
-        const floor = body ? 1 : 1.15;
-        if (actor.y < floor) {
-          actor.y = floor; actor.vy = Math.abs(actor.vy) * (body ? .12 : .24); actor.vx *= .64; actor.vz *= .64; actor.spin *= .55;
-          if (!actor.landed && body) { this.spray(actor.x, 1, actor.z, actor.vx, actor.vz, 12); this.splatter(actor.x, actor.z, 1.8); for (let i = 0; i < 4; i++) this.splatter(actor.x + (Math.random() - .5) * 5, actor.z + (Math.random() - .5) * 5, .35 + Math.random() * .5); }
-          actor.landed = true;
-          if (body) { actor.rx = T.MathUtils.lerp(actor.rx, Math.PI / 2, Math.min(1, dt * 10)); actor.rz *= .8; }
-          if (Math.abs(actor.vx) + Math.abs(actor.vz) < .15) { actor.vx = actor.vz = actor.vy = actor.spin = 0; }
-        }
-      }
+      advanceBody(actor, dt, body ? .4 : .9, this.city.collision, -2 + this.flood, hit => {
+        this.impact(hit);
+        if (body && !hit.water && !actor.landed) { this.spray(actor.x, actor.y, actor.z, actor.vx, actor.vz, 12); this.splatter(actor.x, actor.z, 1.8); }
+      });
+      actor.landed = !!actor.resting;
+      if (!actor.resting) { actor.rx += actor.spin * dt; actor.rz += actor.spin * dt * .4; }
+      else if (body) { actor.rx = T.MathUtils.lerp(actor.rx, Math.PI / 2, Math.min(1, dt * 10)); actor.rz *= Math.exp(-dt * 8); }
+      if (actor.removed) { this.city[body ? 'people' : 'cars'].hide(actor.source.id); if (body) { this.city.heads.hide(actor.source.extra); for (const id of actor.limbs!) this.limbs.hide(id); } continue; }
       const id = actor.source.id;
       if (body) {
         rotation.set(actor.rx, actor.ry, actor.rz);
@@ -236,13 +279,13 @@ export class Effects {
         }
       } else {
         this.city.cars.set(id, actor.x, actor.y, actor.z, 2.25, 1.1, 4.5, actor.ry, actor.rx, actor.rz);
-        if (actor.age < 9 && Math.floor(actor.age * 7) !== Math.floor((actor.age - dt) * 7)) { this.smoke.emit(actor.x, actor.y + 2, actor.z, 1, 7, 0, 8, 3, '#363e40'); this.fire.emit(actor.x, actor.y + 1, actor.z, 0, 5, 0, 5, .6, '#ff842c'); }
+        if (!actor.submerged && actor.age < 9 && Math.floor(actor.age * 7) !== Math.floor((actor.age - dt) * 7)) { this.smoke.emit(actor.x, actor.y + 2, actor.z, 1, 7, 0, 8, 3, '#363e40'); this.fire.emit(actor.x, actor.y + 1, actor.z, 0, 5, 0, 5, .6, '#ff842c'); }
       }
     }
   }
   update(dt: number, time: number) {
     if (dt <= 0) return;
-    this.carSoundCooldown -= dt;
+    this.carSoundCooldown -= dt; this.impactSoundCooldown -= dt;
     for (const queued of [...this.secondaryBlasts]) { queued.delay -= dt; if (queued.delay <= 0) { this.secondaryBlasts.splice(this.secondaryBlasts.indexOf(queued), 1); this.explosion(queued.x, queued.z, 18, 85, true, true); } }
     this.shake *= Math.exp(-dt * 3); this.flash *= Math.exp(-dt * 5); this.flood = 0;
     for (const e of [...this.events]) {
@@ -252,7 +295,13 @@ export class Effects {
         if (e.tick > .025 && e.type === 'meteor') { e.tick = 0; this.fire.emit(e.x + mesh.position.x, mesh.position.y + 8, e.z + mesh.position.z, -20, 30, -10, 32, 1.1, '#ff9e36'); this.smoke.emit(e.x + mesh.position.x, mesh.position.y, e.z + mesh.position.z, -10, 15, -5, 28, 2.4, '#6a5d50'); }
         if (f === 1) {
           const radius = (e.type === 'meteor' ? 105 : e.type === 'nuke' ? 220 : 65) * Math.sqrt(p); this.explosion(e.x, e.z, radius, (e.type === 'nuke' ? 340 : 230) * p);
-          if (e.type === 'nuke') for (let i = 0; i < 100; i++) { const a = Math.random() * Math.PI * 2, h = Math.random() * 180; this.smoke.emit(e.x + Math.cos(a) * (h > 120 ? 70 : 15), h, e.z + Math.sin(a) * (h > 120 ? 70 : 15), Math.cos(a) * 14, 20, Math.sin(a) * 14, 70, 10, '#766550'); }
+
+        }
+      } else if (e.type === 'plume') {
+        if (e.tick > .065) { e.tick = 0; const radius = e.data.radius, age = e.age, top = Math.min(radius * .8, age * 34), spread = Math.min(radius * .38, age * 12);
+          for (let i = 0; i < 6; i++) { const a = Math.random() * Math.PI * 2, cap = i > 2, r = cap ? Math.random() * spread : 3 + Math.random() * 8, y = cap ? top + (Math.random() - .5) * spread * .35 : Math.random() * top;
+            this.smoke.emit(e.x + Math.cos(a) * r, 3 + y, e.z + Math.sin(a) * r, Math.cos(a) * (cap ? 7 : 2) + 3, cap ? 4 : 15, Math.sin(a) * (cap ? 7 : 2), (cap ? 12 : 7) + spread * .22, 1.8 + Math.random() * 2.5, age < 1 ? '#a18a65' : '#59605d');
+          }
         }
       } else if (e.type === 'ring') {
         this.shockwave(e);
@@ -262,7 +311,7 @@ export class Effects {
         e.x += Math.sin(t * .3) * dt * 18; e.z -= dt * 12; e.group.position.set(e.x, 0, e.z);
         e.group.children.forEach((ring, i) => { ring.rotation.z = time * (2 + i * .025); ring.position.x = Math.sin(time * 1.8 + i * .12) * i * .28; ring.position.z = Math.cos(time * 1.5 + i * .1) * i * .25; });
         if (e.tick > .2) { e.tick = 0; this.city.hit({ x: e.x, z: e.z, radius: 78 * Math.sqrt(p), strength: 19 * p }); for (let i = 0; i < 6; i++) { const a = Math.random() * 6.28, h = Math.random() * 140; this.smoke.emit(e.x + Math.cos(a) * (12 + h * .2), h, e.z + Math.sin(a) * (12 + h * .2), -Math.sin(a) * 45, 22, Math.cos(a) * 45, 18, 1.4, '#5a6568'); } }
-        for (const d of this.debris) if (d && Math.hypot(d.x - e.x, d.z - e.z) < 100) { const dx = d.x - e.x, dz = d.z - e.z; d.vx += (-dx * .8 - dz * 2) * dt; d.vz += (-dz * .8 + dx * 2) * dt; d.vy += 90 * dt; d.life = 6; }
+        for (const d of [...this.debris, ...this.wrecks, ...this.bodies]) if (d && !d.removed && !d.submerged && Math.hypot(d.x - e.x, d.z - e.z) < 110) { const dx = d.x - e.x, dz = d.z - e.z; d.vx += (-dx * .7 - dz * 1.7 - d.vx * .65) * dt; d.vz += (-dz * .7 + dx * 1.7 - d.vz * .65) * dt; d.vy += (85 - d.y * .34 - d.vy * .8) * dt; d.resting = false; }
       } else if (e.type === 'ufo') {
         e.group.rotation.y = t * .12;
         e.group.children.forEach((ship, i) => { ship.position.x = Math.cos(t * .28 + i * 2.094) * 75; ship.position.z = Math.sin(t * .28 + i * 2.094) * 75; ship.position.y = 142 + Math.sin(time + i) * 8; });
@@ -286,19 +335,22 @@ export class Effects {
         const scale = Math.min(1, t / 2, (e.duration - t) / 2); e.group.scale.setScalar(scale);
         e.group.children.forEach((c, i) => { if (i) c.rotation.z = t * (.3 + i * .25); });
         if (e.tick > .35) { e.tick = 0; this.city.hit({ x: e.x, z: e.z, radius: 175 * Math.sqrt(p) * scale, strength: 19 * p }); }
-        for (const d of this.debris) if (d && Math.hypot(d.x - e.x, d.z - e.z) < 240) { d.vx += (e.x - d.x) * dt * 1.7; d.vy += (65 - d.y) * dt * 2 + 30 * dt; d.vz += (e.z - d.z) * dt * 1.7; d.life = 4; if (Math.hypot(d.x - e.x, d.y - 65, d.z - e.z) < 25) { d.y = -80; d.life = 0; this.debrisBatch.hide(d.id); } }
+        for (const d of this.debris) if (d && !d.removed && Math.hypot(d.x - e.x, d.z - e.z) < 240) { d.vx += (e.x - d.x) * dt * 1.7; d.vy += (65 - d.y) * dt * 2 + 30 * dt; d.vz += (e.z - d.z) * dt * 1.7; d.life = 4; if (Math.hypot(d.x - e.x, d.y - 65, d.z - e.z) < 25) { d.y = -80; d.life = 0; d.removed = true; this.debrisBatch.hide(d.id); } }
       }
       if (e.age >= e.duration) this.removeEvent(e);
     }
     for (const d of this.debris) {
-      if (!d || d.life <= 0) continue; d.life -= dt;
-      d.vy -= 28 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt; d.rx += d.spin * dt; d.rz += d.spin * dt * .7;
-      if (d.y < d.sy * .5 + .35) { d.y = d.sy * .5 + .35; d.vy = Math.abs(d.vy) * .22; d.vx *= .68; d.vz *= .68; d.spin *= .5; if (Math.hypot(d.vx, d.vz) < .2) { d.vy = 0; d.spin = 0; } }
+      if (!d || d.removed) continue; d.life -= dt;
+      advanceBody(d, dt, Math.max(.25, Math.min(d.sx, d.sy, d.sz) * .5), this.city.collision, -2 + this.flood, hit => this.impact(hit));
+      if (d.removed) { this.debrisBatch.hide(d.id); continue; }
+      if (!d.resting) { d.rx += d.spin * dt; d.rz += d.spin * dt * .7; }
       this.debrisBatch.set(d.id, d.x, d.y, d.z, d.sx, d.sy, d.sz, 0, d.rx, d.rz);
     }
+    for (const ring of this.ripples) { if (!ring) continue; ring.age += dt; const t = ring.age / 2.5; this.rippleOpacity[ring.id] = Math.max(0, 1 - t); if (t >= 1) this.rippleBatch.hide(ring.id); else this.rippleBatch.set(ring.id, ring.x, -1.85 + this.flood, ring.z, ring.size * (.3 + t), 1, ring.size * (.3 + t)); }
+    this.rippleBatch.mesh.geometry.attributes.aOpacity.needsUpdate = true; this.sprayWater.update(dt);
     this.updateActors(dt); this.fire.update(dt); this.smoke.update(dt); this.blood.update(dt);
   }
   removeEvent(e: Event) { this.scene.remove(e.group); e.group.traverse(o => { if (o instanceof T.Mesh) { o.geometry.dispose(); for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.dispose(); } }); const i = this.events.indexOf(e); if (i >= 0) this.events.splice(i, 1); }
   setBloodEnabled(enabled: boolean) { this.bloodEnabled = enabled; this.blood.mesh.visible = enabled; this.splats.mesh.visible = enabled; }
-  reset() { for (const e of [...this.events]) this.removeEvent(e); this.fire.clear(); this.smoke.clear(); this.blood.clear(); this.debris = []; this.debrisCursor = 0; this.debrisBatch.used = 0; this.debrisBatch.mesh.count = 0; this.wrecks = []; this.bodies = []; this.secondaryBlasts = []; this.splats.used = this.splats.mesh.count = this.splatCursor = 0; this.limbs.used = this.limbs.mesh.count = 0; this.carExplosions = this.deaths = this.waveCounter = 0; this.carSoundCooldown = 0; this.executed = 0; this.flood = 0; this.flash = 0; this.shake = 0; }
+  reset() { for (const e of [...this.events]) this.removeEvent(e); this.fire.clear(); this.smoke.clear(); this.sprayWater.clear(); this.ripples = []; this.rippleCursor = this.rippleBatch.used = this.rippleBatch.mesh.count = 0; this.waterImpacts = this.solidImpacts = this.buildingImpacts = this.aircraftDestroyed = 0; this.blood.clear(); this.debris = []; this.debrisCursor = 0; this.debrisBatch.used = 0; this.debrisBatch.mesh.count = 0; this.wrecks = []; this.bodies = []; this.secondaryBlasts = []; this.splats.used = this.splats.mesh.count = this.splatCursor = 0; this.limbs.used = this.limbs.mesh.count = 0; this.carExplosions = this.deaths = this.waveCounter = 0; this.carSoundCooldown = 0; this.executed = 0; this.flood = 0; this.flash = 0; this.shake = 0; }
 }

@@ -22,7 +22,7 @@ test('damage travels with the expanding front and is applied only once per build
   fx.explosion(0, 0, 150, 40, false); assert.equal(city.damage, 0);
   fx.update(.2, .2); assert.ok(city.buildings[0].health < 100); assert.equal(city.buildings[1].health, 100);
   const nearHealth = city.buildings[0].health; advance(city, fx, 2);
-  assert.equal(city.buildings[0].health, nearHealth); assert.ok(city.buildings[1].health < 100); assert.equal(fx.events.length, 0); city.dispose();
+  assert.equal(city.buildings[0].health, nearHealth); assert.ok(city.buildings[1].health < 100); assert.equal(fx.events.filter(e => e.type === 'ring').length, 0); city.dispose();
 });
 test('collapsing buildings on opposite sides eject fragments away from the explosion', () => {
   const { city, fx } = fixture(); city.traffic = []; city.pedestrians = []; city.buildings = city.buildings.slice(0, 2);
@@ -34,7 +34,7 @@ test('collapsing buildings on opposite sides eject fragments away from the explo
 test('a wave relaunches existing rubble once, without accelerating it every frame', () => {
   const { city, fx } = fixture(); city.buildings = []; city.traffic = []; city.pedestrians = [];
   fx.chunk(35, 10, 0, 1, 1, 1, 0, 0, 0, '#555555'); fx.explosion(0, 0, 100, 150, false);
-  fx.update(.5, .5); const vx = fx.debris[0].vx; assert.ok(vx > 0); fx.update(.02, .52); assert.equal(fx.debris[0].vx, vx); city.dispose();
+  fx.update(.5, .5); const vx = fx.debris[0].vx; assert.ok(vx > 0); fx.update(.02, .52); assert.ok(fx.debris[0].vx <= vx && fx.debris[0].vx > vx * .95, 'air drag slows the fragment; the wave must not add a second kick'); city.dispose();
 });
 test('cars ignite neighbouring cars through delayed secondary explosions, exactly once each', () => {
   const { city, fx } = fixture(); city.buildings = []; city.pedestrians = []; city.traffic = city.traffic.slice(0, 2);

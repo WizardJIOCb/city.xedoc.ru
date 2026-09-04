@@ -8,7 +8,7 @@ import { Sound } from '../src/audio.ts';
 function setup() { const scene = new Scene(), city = new City(scene, 'NEW-HAVEN', 14), fx = new Effects(scene, city, new Sound()); return { scene, city, fx }; }
 function simulate(city, fx, seconds) { for (let t = .1; t <= seconds; t += .1) { city.update(.1, t); fx.update(.1, t); } }
 
-for (const d of DISASTERS) test(`${d.id}: applies sustained damage and finishes its lifecycle`, () => {
+for (const d of DISASTERS.filter(d => d.category !== 'troops')) test(`${d.id}: applies sustained damage and finishes its lifecycle`, () => {
   const { city, fx } = setup();
   fx.trigger(d.id, 0, 0); simulate(city, fx, 40);
   assert.ok(city.damage > 0, `${d.id} must damage an actual city`);

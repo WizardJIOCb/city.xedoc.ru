@@ -1,5 +1,5 @@
 export class Sound {
-  ctx: AudioContext | null = null; enabled = true;
+  ctx: AudioContext | null = null; enabled = false;
   unlock() { if (!this.ctx) this.ctx = new AudioContext(); if (this.ctx.state === 'suspended') void this.ctx.resume(); }
   impact(power = 1) {
     if (!this.enabled || !this.ctx) return;
@@ -11,5 +11,6 @@ export class Sound {
     src.connect(low).connect(gain).connect(c.destination); src.start();
     const osc = c.createOscillator(), g = c.createGain(); osc.frequency.setValueAtTime(85, c.currentTime); osc.frequency.exponentialRampToValueAtTime(22, c.currentTime + .65); g.gain.setValueAtTime(.13 * Math.min(power, 2), c.currentTime); g.gain.exponentialRampToValueAtTime(.001, c.currentTime + 1); osc.connect(g).connect(c.destination); osc.start(); osc.stop(c.currentTime + 1);
   }
+  shot() { if (!this.enabled || !this.ctx) return; const c = this.ctx, buffer = c.createBuffer(1, c.sampleRate * .13, c.sampleRate), data = buffer.getChannelData(0); for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (c.sampleRate * .018)); const src = c.createBufferSource(), filter = c.createBiquadFilter(), gain = c.createGain(); src.buffer = buffer; filter.type = 'bandpass'; filter.frequency.value = 750; gain.gain.value = .055; src.connect(filter).connect(gain).connect(c.destination); src.start(); }
   select() { if (!this.enabled || !this.ctx) return; const c = this.ctx, o = c.createOscillator(), g = c.createGain(); o.frequency.setValueAtTime(520, c.currentTime); o.frequency.exponentialRampToValueAtTime(820, c.currentTime + .055); g.gain.setValueAtTime(.025, c.currentTime); g.gain.exponentialRampToValueAtTime(.001, c.currentTime + .08); o.connect(g).connect(c.destination); o.start(); o.stop(c.currentTime + .09); }
 }
