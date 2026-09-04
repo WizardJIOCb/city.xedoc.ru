@@ -9,3 +9,5 @@
 .categories{overflow-y:hidden;scrollbar-width:none}.categories::-webkit-scrollbar{display:none}
 
 .mini-switch{border:1px solid #91aaa238;border-radius:4px;background:#243c42;color:#b3c5bc;font:600 9px Manrope,sans-serif;padding:4px 6px;cursor:pointer;margin-left:auto;margin-right:8px}
+
+#world.dragging{cursor:grabbing}

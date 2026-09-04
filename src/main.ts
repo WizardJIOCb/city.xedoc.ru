@@ -29,7 +29,7 @@ canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); showError
 const scene = new T.Scene(); scene.background = new T.Color('#8aaeb9'); scene.fog = new T.FogExp2('#8aaeb9', .00016);
 const camera = new T.PerspectiveCamera(43, innerWidth / innerHeight, 1, 8500);
 const controls = new OrbitControls(camera, canvas); controls.enableDamping = true; controls.dampingFactor = .07; controls.minDistance = 45; controls.maxDistance = 4400; controls.maxPolarAngle = Math.PI / 2 - .07; controls.minPolarAngle = .13; controls.panSpeed = .8; controls.rotateSpeed = .7; controls.zoomSpeed = .85;
-controls.mouseButtons = { LEFT: undefined as unknown as T.MOUSE, MIDDLE: T.MOUSE.PAN, RIGHT: T.MOUSE.ROTATE }; controls.touches = { ONE: undefined as unknown as T.TOUCH, TWO: T.TOUCH.DOLLY_ROTATE };
+controls.mouseButtons = { LEFT: T.MOUSE.PAN, MIDDLE: T.MOUSE.PAN, RIGHT: T.MOUSE.ROTATE }; controls.screenSpacePanning = false; controls.touches = { ONE: undefined as unknown as T.TOUCH, TWO: T.TOUCH.DOLLY_ROTATE };
 const ambient = new T.HemisphereLight('#cce8ff', '#a79470', 1.35); scene.add(ambient);
 const sun = new T.DirectionalLight('#ffe3b9', 3.1); sun.position.set(-330, 620, 400); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048); sun.shadow.camera.left = -800; sun.shadow.camera.right = 800; sun.shadow.camera.top = 800; sun.shadow.camera.bottom = -800; sun.shadow.camera.far = 2000; sun.shadow.normalBias = 1; sun.shadow.bias = -.00015; scene.add(sun);
 const envGenerator = new T.PMREMGenerator(renderer), room = new RoomEnvironment(); const environment = envGenerator.fromScene(room, .04); scene.environment = environment.texture; scene.environmentIntensity = .3; room.dispose(); envGenerator.dispose();
@@ -59,17 +59,30 @@ function toast(title: string, description: string, name = 'meteor') { el('toast-
 effects.onEvent = (name, message) => toast(name, message, DISASTERS.find(d => d.name === name)?.icon ?? 'activity');
 function setSelected(id: DisasterId) { selected = id; el('squad-options').hidden = !id.startsWith('squad_'); el('action-hint').innerHTML = icon('pointer') + (id.startsWith('squad_') ? '<span>Выберите команду. <b>Нажмите на сушу для высадки.</b></span>' : '<span>Выберите катастрофу. <b>Нажмите на город.</b></span>'); selectCard(id); const d = DISASTERS.find(d => d.id === id)!; const color = new T.Color(d.color); (targetRing.material as T.MeshBasicMaterial).color.copy(color); (innerRing.material as T.MeshBasicMaterial).color.copy(color); sound.select(); }
 function pointAt(x: number, y: number) { const r = canvas.getBoundingClientRect(); pointer.set((x - r.left) / r.width * 2 - 1, -(y - r.top) / r.height * 2 + 1); raycaster.setFromCamera(pointer, camera); aimedPlane = null; const air = raycaster.intersectObjects(city.planes.filter(p => p.userData.alive), true); if (air.length) { let parent = air[0].object; while (parent.parent && !city.planes.includes(parent as T.Group)) parent = parent.parent; aimedPlane = parent as T.Group; hitPoint.copy(air[0].point); return hitPoint; } const hits = raycaster.intersectObject(city.facade.mesh); if (hits.length) { hitPoint.copy(hits[0].point); hitPoint.y = .8; return hitPoint; } return raycaster.ray.intersectPlane(ground, hitPoint); }
-const down = { x: 0, y: 0, time: 0 }; let touches = 0, gesture = false;
-canvas.addEventListener('pointermove', e => { if (pointAt(e.clientX, e.clientY)) { target.position.set(hitPoint.x, 1.5, hitPoint.z); targetCross.position.set(hitPoint.x, 1.6, hitPoint.z); const def = DISASTERS.find(d => d.id === selected)!; target.scale.setScalar(def.radius * Math.sqrt(effects.power)); target.visible = !cinematic && Math.hypot(hitPoint.x, hitPoint.z) < city.worldRadius; targetCross.visible = target.visible; } });
+const down = { pointerId: -1, x: 0, y: 0, time: 0, dragged: false }; let touches = 0, gesture = false;
+function clearPointer() { down.pointerId = -1; down.dragged = false; canvas.classList.remove('dragging'); }
+canvas.addEventListener('pointermove', e => {
+  // Latch the whole gesture, so dragging back to its start cannot fire a tool.
+  if (e.pointerId === down.pointerId && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 7) down.dragged = true;
+  if (down.dragged || gesture || (e.pointerType === 'mouse' && (e.buttons & 6))) { canvas.classList.toggle('dragging', e.pointerType === 'mouse'); target.visible = targetCross.visible = false; return; }
+  if (pointAt(e.clientX, e.clientY)) { target.position.set(hitPoint.x, 1.5, hitPoint.z); targetCross.position.set(hitPoint.x, 1.6, hitPoint.z); const def = DISASTERS.find(d => d.id === selected)!; target.scale.setScalar(def.radius * Math.sqrt(effects.power)); target.visible = !cinematic && Math.hypot(hitPoint.x, hitPoint.z) < city.worldRadius; targetCross.visible = target.visible; }
+});
 canvas.addEventListener('pointerleave', () => { target.visible = false; targetCross.visible = false; });
-canvas.addEventListener('pointerdown', e => { sound.unlock(); if (e.pointerType === 'touch') { touches++; if (touches > 1) gesture = true; } if (e.button === 0) { down.x = e.clientX; down.y = e.clientY; down.time = performance.now(); } });
+canvas.addEventListener('pointerdown', e => { sound.unlock(); if (e.pointerType === 'touch') { touches++; if (touches > 1) gesture = true; } if (e.button === 0 && down.pointerId === -1) { down.pointerId = e.pointerId; down.x = e.clientX; down.y = e.clientY; down.time = performance.now(); down.dragged = false; } });
 canvas.addEventListener('pointerup', e => {
   if (e.pointerType === 'touch') touches = Math.max(0, touches - 1);
-  if (e.button !== 0 || gesture || generating || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 7 || performance.now() - down.time > 600) { if (!touches) gesture = false; return; }
+  const tap = e.pointerId === down.pointerId && e.button === 0 && !down.dragged && !gesture && !generating && Math.hypot(e.clientX - down.x, e.clientY - down.y) <= 7 && performance.now() - down.time <= 600;
+  if (e.pointerId === down.pointerId) clearPointer();
+  if (!touches) gesture = false;
+  canvas.classList.remove('dragging');
+  if (!tap) return;
   if (paused) { toast('Симуляция на паузе', 'Нажмите пробел, чтобы продолжить', 'pause'); return; }
   if (pointAt(e.clientX, e.clientY) && Math.hypot(hitPoint.x, hitPoint.z) < city.worldRadius) { if (aimedPlane && !selected.startsWith('squad_')) city.destroyPlane(aimedPlane, { x: hitPoint.x - 5, z: hitPoint.z, radius: 45, strength: 170, impulse: true }); effects.trigger(selected, hitPoint.x, hitPoint.z); }
 });
-canvas.addEventListener('pointercancel', () => { touches = 0; gesture = false; }); canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('pointercancel', () => { clearPointer(); touches = 0; gesture = false; });
+canvas.addEventListener('lostpointercapture', () => clearPointer());
+window.addEventListener('blur', () => { clearPointer(); touches = 0; gesture = false; });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
 for (const b of document.querySelectorAll<HTMLElement>('[data-disaster]')) b.onclick = () => { sound.unlock(); setSelected(b.dataset.disaster as DisasterId); };
 for (const b of document.querySelectorAll<HTMLElement>('[data-category]')) b.onclick = () => {
   for (const tab of document.querySelectorAll('[data-category]')) tab.classList.toggle('active', tab === b);
