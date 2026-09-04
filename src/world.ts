@@ -1,29 +1,40 @@
 import * as T from 'three';
 import { CollisionWorld } from './physics';
 import { createIslandTerrain } from './island-terrain';
+import { basinDepth, SEA_LEVEL, type Basin } from './local-water';
 import { CELL, generateLayout, seededRandom, blastDamage, blastImpulse, islandRadius } from './model.js';
 
 const dummy = new T.Object3D();
 const white = new T.Color();
 export class Batch {
   mesh: T.InstancedMesh; used = 0;
-  constructor(group: T.Group | T.Scene, geometry: T.BufferGeometry, material: T.Material, capacity: number, shadow = true) {
+  private originalY: Float32Array; private grounded: Uint8Array;
+  constructor(group: T.Group | T.Scene, geometry: T.BufferGeometry, material: T.Material, capacity: number, shadow = true, public groundOffset?: (x: number, z: number) => number) {
+    this.originalY = new Float32Array(capacity); this.grounded = new Uint8Array(capacity);
     this.mesh = new T.InstancedMesh(geometry, material, capacity); this.mesh.count = 0; this.mesh.castShadow = shadow; this.mesh.receiveShadow = true; this.mesh.frustumCulled = false; this.mesh.instanceMatrix.setUsage(T.DynamicDrawUsage); group.add(this.mesh);
   }
   add(x: number, y: number, z: number, sx: number, sy: number, sz: number, color: T.ColorRepresentation, ry = 0) {
     const id = this.used++; this.set(id, x, y, z, sx, sy, sz, ry); this.mesh.setColorAt(id, white.set(color)); if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true; this.mesh.count = this.used; return id;
   }
-  set(id: number, x: number, y: number, z: number, sx: number, sy: number, sz: number, ry = 0, rx = 0, rz = 0) {
-    dummy.position.set(x, y, z); dummy.scale.set(sx, sy, sz); dummy.rotation.set(rx, ry, rz); dummy.updateMatrix(); this.mesh.setMatrixAt(id, dummy.matrix); this.mesh.instanceMatrix.needsUpdate = true;
+  set(id: number, x: number, y: number, z: number, sx: number, sy: number, sz: number, ry = 0, rx = 0, rz = 0, grounded = true) {
+    this.originalY[id] = y; this.grounded[id] = grounded ? 1 : 0;
+    dummy.position.set(x, y + (grounded ? this.groundOffset?.(x, z) ?? 0 : 0), z); dummy.scale.set(sx, sy, sz); dummy.rotation.set(rx, ry, rz); dummy.updateMatrix(); this.mesh.setMatrixAt(id, dummy.matrix); this.mesh.instanceMatrix.needsUpdate = true;
   }
-  hide(id: number) { this.set(id, 0, -200, 0, 0, 0, 0); }
+  hide(id: number) { this.set(id, 0, -200, 0, 0, 0, 0, 0, 0, 0, false); }
+  refreshGround() {
+    if (!this.groundOffset) return;
+    const matrix = this.mesh.instanceMatrix.array;
+    for (let id = 0; id < this.used; id++) if (this.grounded[id]) matrix[id * 16 + 13] = this.originalY[id] + this.groundOffset(matrix[id * 16 + 12], matrix[id * 16 + 14]);
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
   color(id: number, c: T.ColorRepresentation) { this.mesh.setColorAt(id, white.set(c)); if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true; }
 }
 type Part = { batch: Batch; id: number; x: number; y: number; z: number; sx: number; sy: number; sz: number };
 export type Building = { x: number; z: number; width: number; depth: number; height: number; hue: number; centrality: number; roof: number; health: number; fire: number; collapsed: boolean; collapse: number; parts: Part[]; color: T.Color; tiltX: number; tiltZ: number; blast?: Hit; };
 export type Citizen = { x: number; z: number; axis: boolean; start: number; end: number; speed: number; id: number; extra: number; alive: boolean; phase: number; };
 export type Island = { x: number; z: number; radius: number; phase: number; name: string; dock: T.Vector3 };
-export type Hit = { x: number; z: number; radius: number; strength: number; fire?: boolean; impulse?: boolean; waveId?: number; front?: { previous: number; current: number }; };
+export type Hit = { x: number; z: number; radius: number; strength: number; fire?: boolean; impulse?: boolean; flow?: { x: number; z: number }; waveId?: number; front?: { previous: number; current: number }; };
+export type DockSection = { x: number; y: number; z: number; width: number; depth: number; height: number; rotation: number; ids: number[]; health: number; alive: boolean };
 export class City {
   group = new T.Group(); buildings: Building[] = []; trees: { x: number; z: number; id: number; trunk: number; alive: boolean }[] = [];
   layout: ReturnType<typeof generateLayout>; extent: number; rng: () => number;
@@ -38,6 +49,12 @@ export class City {
   islands: Island[] = []; collision: CollisionWorld; worldRadius = 0;
   landCells = new Set<string>(); terrainRects: { x: number; z: number; width: number; depth: number; y: number }[] = [];
   onPlaneDestroyed: (plane: T.Group, hit: Hit) => void = () => {};
+  onShipDestroyed: (ship: T.Group, hit: Hit) => void = () => {};
+  onDockDestroyed: (dock: DockSection, hit: Hit) => void = () => {};
+  onCarFlooded: (car: Citizen, flow?: { x: number; z: number }) => void = () => {};
+  docks: DockSection[] = []; basins: Basin[] = []; private groundCache = new Map<string, number>();
+  private dockCells = new Map<string, DockSection[]>();
+  waterLevelAt: (x: number, z: number) => number = () => SEA_LEVEL;
   onHit: (hit: Hit) => void = () => {};
   fireClock = 0; miniMapDirty = true;
   constructor(public scene: T.Scene, public seed = 'NEW-HAVEN', public size = 18, public style = 'bay') {
@@ -68,6 +85,7 @@ export class City {
     this.cars = new Batch(this.group, box, new T.MeshStandardMaterial({ roughness: .4, metalness: .3 }), 400);
     this.cabins = new Batch(this.group, box, new T.MeshStandardMaterial({ color: '#7196a7', roughness: .2, metalness: .55 }), 400);
     this.people = new Batch(this.group, box, standard, 700, false); this.heads = new Batch(this.group, new T.IcosahedronGeometry(.3, 0), standard, 700, false);
+    for (const batch of this.groundBatches) batch.groundOffset = (x, z) => this.groundOffset(x, z);
     this.generate(); this.collision = new CollisionWorld(this); this.worldRadius = this.extent + 1350; this.population = this.buildings.length * 43 + this.traffic.length * 2;
     scene.add(this.group);
   }
@@ -98,11 +116,9 @@ export class City {
       for (let x = -90; x <= 90; x += 45) { this.solid.add(x, 12, z - 5, 2, 24, 2, '#d8bba1'); this.solid.add(x, 12, z + 5, 2, 24, 2, '#d8bba1'); }
     }
     // Promenade, piers and protective seawall.
-    for (let x = -e * .65; x < e * .68; x += 20) { this.solid.add(x, 1.3, e + 14, 20, 3.3, 9, '#b7ae93'); this.solid.add(x, 2.1, e + 18.5, 20, 1, .6, '#c5bfa8'); }
+    for (let x = -e * .65; x < e * .68; x += 20) { const dock = this.addDock(x, 1.3, e + 14, 20, 3.3, 9, '#b7ae93'); dock.ids.push(this.solid.add(x, 2.1, e + 18.5, 20, 1, .6, '#c5bfa8')); }
     for (let k = 0; k < 4; k++) this.createPlane(k);
     this.terrainRects.push({ x: e + 70, z: -70, width: 100, depth: 420, y: 1.5 });
-    for (let j = 0; j < 3; j++) this.terrainRects.push({ x: -e * .62 + j * 68, z: e + 48, width: 40, depth: 105, y: 2.7 });
-    this.terrainRects.push({ x: 0, z: e + 14, width: e * 1.34, depth: 9, y: 2.95 });
     if (this.style === 'islands') for (const z of [-124, 124]) this.terrainRects.push({ x: 0, z, width: 200, depth: 12, y: 4.5 });
     this.createIslands();
   }
@@ -125,7 +141,38 @@ export class City {
       }
       this.buildings.push(b);
     }
+  get groundBatches() { return [this.solid, this.facade, this.foliage, this.cars, this.cabins, this.people, this.heads]; }
+  groundOffset(x: number, z: number): number {
+    if (!this.basins.length) return 0;
+    const key = `${Math.floor(x / CELL)},${Math.floor(z / CELL)}`;
+    // City blocks subside as rigid pieces, along with their roads and buildings.
+    if (this.landCells.has(key)) {
+      const cached = this.groundCache.get(key); if (cached !== undefined) return cached;
+      const offset = -Math.max(0, ...this.basins.map(b => basinDepth(b, (Math.floor(x / CELL) + .5) * CELL, (Math.floor(z / CELL) + .5) * CELL)));
+      this.groundCache.set(key, offset); return offset;
+    }
+    return -Math.max(0, ...this.basins.map(b => basinDepth(b, x, z)));
+  }
+  refreshGround() {
+    this.groundCache.clear();
+    for (const batch of this.groundBatches) batch.refreshGround();
+    this.group.traverse(object => {
+      if (!(object instanceof T.Mesh) || object.name !== 'island-terrain') return;
+      const affected = this.basins.some(b => Math.hypot(b.x - object.position.x, b.z - object.position.z) < b.radius + object.userData.terrainRadius);
+      if (!affected && !object.userData.subsidedTerrain) return;
+      object.userData.subsidedTerrain = affected;
+      const positions = object.geometry.attributes.position;
+      const original = object.userData.originalTerrain ??= positions.array.slice();
+      for (let i = 0; i < positions.count; i++) positions.setY(i, original[i * 3 + 1] + this.groundOffset(object.position.x + positions.getX(i), object.position.z + positions.getZ(i)));
+      positions.needsUpdate = true; object.geometry.computeVertexNormals(); object.geometry.computeBoundingSphere();
+    });
+    this.miniMapDirty = true;
+  }
   terrainHeight(x: number, z: number): number | null {
+    const base = this.baseTerrainHeight(x, z); return base === null ? null : base + this.groundOffset(x, z);
+  }
+  baseTerrainHeight(x: number, z: number): number | null {
+    for (const dock of this.dockCells.get(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`) ?? []) if (dock.alive && this.onDock(dock, x, z)) return dock.y + dock.height / 2;
     for (const r of this.terrainRects) if (Math.abs(x - r.x) <= r.width / 2 && Math.abs(z - r.z) <= r.depth / 2) return r.y;
     if (this.landCells.has(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`)) return .7;
     for (const island of this.islands) if (Math.hypot(x - island.x, z - island.z) < islandRadius(Math.atan2(z - island.z, x - island.x), island.radius, island.phase)) return .7;
@@ -141,8 +188,7 @@ export class City {
       this.islands.push({ x, z, radius, phase: i, name: names[i], dock });
       const terrain = createIslandTerrain(radius, i);
       terrain.position.set(x, 0, z); this.group.add(terrain);
-      const pier = new T.Mesh(new T.BoxGeometry(52, 2, 9), new T.MeshStandardMaterial({ color: '#a58c6a' })); pier.position.set(dock.x + Math.cos(a) * 38, .1, dock.z + Math.sin(a) * 38); pier.rotation.y = -a; this.group.add(pier);
-      this.terrainRects.push({ x: pier.position.x, z: pier.position.z, width: Math.abs(Math.cos(a)) * 52 + 9, depth: Math.abs(Math.sin(a)) * 52 + 9, y: 1.1 });
+      for (let k = 0; k < 4; k++) { const distance = 18.5 + k * 13; this.addDock(dock.x + Math.cos(a) * distance, .1, dock.z + Math.sin(a) * distance, 13, 2, 9, '#a58c6a', -a); }
       for (let j = 0; j < 18; j++) {
         const bx = x + (j % 6 - 2.5) * 31, bz = z + (Math.floor(j / 6) - 1) * 58 + (j % 2 ? 17 : -17);
         this.addBuilding({ x: bx, z: bz, width: 15 + r() * 8, depth: 16 + r() * 6, height: 7.2 + Math.floor(r() * 4) * 3.6, hue: .45 + r() * .5, centrality: 0, roof: r() });
@@ -176,6 +222,32 @@ export class City {
     plane.userData.alive = false; plane.visible = false; plane.userData.falling = false;
     this.onPlaneDestroyed(plane, hit); this.miniMapDirty = true;
   }
+  destroyShip(ship: T.Group, hit: Hit, shatter = false) {
+    if (!ship.userData.alive) return;
+    ship.userData.alive = false; if (shatter) ship.visible = false;
+    this.onShipDestroyed(ship, hit); this.miniMapDirty = true;
+  }
+  addDock(x: number, y: number, z: number, width: number, height: number, depth: number, color: T.ColorRepresentation, rotation = 0) {
+    const dock: DockSection = { x, y, z, width, height, depth, rotation, health: 100, alive: true, ids: [this.solid.add(x, y, z, width, height, depth, color, rotation)] };
+    this.docks.push(dock);
+    const halfX = (Math.abs(Math.cos(rotation)) * width + Math.abs(Math.sin(rotation)) * depth) / 2;
+    const halfZ = (Math.abs(Math.sin(rotation)) * width + Math.abs(Math.cos(rotation)) * depth) / 2;
+    for (let cx = Math.floor((x - halfX) / CELL); cx <= Math.floor((x + halfX) / CELL); cx++) for (let cz = Math.floor((z - halfZ) / CELL); cz <= Math.floor((z + halfZ) / CELL); cz++) {
+      const key = `${cx},${cz}`, list = this.dockCells.get(key) ?? []; list.push(dock); this.dockCells.set(key, list);
+    }
+    return dock;
+  }
+  onDock(dock: DockSection, x: number, z: number) {
+    const dx = x - dock.x, dz = z - dock.z, c = Math.cos(dock.rotation), s = Math.sin(dock.rotation);
+    return Math.abs(c * dx - s * dz) <= dock.width / 2 && Math.abs(s * dx + c * dz) <= dock.depth / 2;
+  }
+  damageDock(dock: DockSection, amount: number, hit: Hit) {
+    if (!dock.alive) return; dock.health = Math.max(0, dock.health - amount);
+    if (dock.health > 0) return;
+    dock.alive = false; this.onDockDestroyed(dock, hit);
+    for (const id of dock.ids) this.solid.hide(id);
+    this.miniMapDirty = true;
+  }
   part(b: Building, batch: Batch, x: number, y: number, z: number, sx: number, sy: number, sz: number, color: T.ColorRepresentation) { const id = batch.add(x, y, z, sx, sy, sz, color); b.parts.push({ batch, id, x, y, z, sx, sy, sz }); }
   tree(x: number, z: number, size: number) {
     const trunk = this.solid.add(x, size * .7, z, .65, size * 1.4, .65, '#6e624a');
@@ -204,9 +276,9 @@ export class City {
     const e = this.extent;
     for (let j = 0; j < 3; j++) {
       const x = -e * .62 + j * 68;
-      this.solid.add(x, -.8, e + 48, 40, 7, 105, '#8e9690');
-      for (let k = 0; k < 8; k++) this.solid.add(x + (k % 2) * 14 - 8, 4, e + Math.floor(k / 2) * 15, 11, 5, 7, ['#698d96', '#b76745', '#b89c51'][k % 3]);
-      const a = this.solid.add(x - 12, 23, e + 55, 2, 45, 2, '#d0a14a'), b = this.solid.add(x + 4, 44, e + 55, 36, 2, 2, '#d0a14a'), c = this.solid.add(x + 21, 32, e + 55, .3, 24, .3, '#798388'); this.props.push({ x, y: 25, z: e + 55, ids: [a, b, c], alive: true });
+      const sections = Array.from({ length: 5 }, (_, k) => this.addDock(x, -.8, e + 6 + k * 21, 40, 7, 21, '#8e9690'));
+      for (let k = 0; k < 8; k++) { const z = e + Math.floor(k / 2) * 15; sections[Math.min(4, Math.floor((z - e + 4.5) / 21))].ids.push(this.solid.add(x + (k % 2) * 14 - 8, 4, z, 11, 5, 7, ['#698d96', '#b76745', '#b89c51'][k % 3])); }
+      const a = this.solid.add(x - 12, 23, e + 55, 2, 45, 2, '#d0a14a'), b = this.solid.add(x + 4, 44, e + 55, 36, 2, 2, '#d0a14a'), c = this.solid.add(x + 21, 32, e + 55, .3, 24, .3, '#798388'); sections[2].ids.push(a, b, c);
     }
     const ship = new T.Group(), mat = new T.MeshStandardMaterial({ color: '#c6cbc0', roughness: .6 });
     const hull = new T.Mesh(new T.BoxGeometry(18, 8, 70), new T.MeshStandardMaterial({ color: '#314e5d' })); hull.position.y = 2; ship.add(hull);
@@ -247,24 +319,37 @@ export class City {
     }
     for (const p of this.pedestrians) if (p.alive && reached(Math.hypot(p.x - hit.x, p.z - hit.z)) && hit.strength > 10) { p.alive = false; this.onDeath(p, hit); }
     for (const p of this.props) if (p.alive && hit.strength > 50 && reached(Math.hypot(p.x - hit.x, p.z - hit.z), .85)) { p.alive = false; for (const id of p.ids) this.solid.hide(id); this.onWreck(p.x, p.y, p.z, '#7c8581', hit); }
+    for (const dock of this.docks) if (dock.alive) { const distance = Math.max(0, Math.hypot(dock.x - hit.x, dock.z - hit.z) - Math.min(dock.width, dock.depth) * .4); if (reached(distance)) this.damageDock(dock, blastDamage(distance, hit.radius, hit.strength, .65), hit); }
     for (const plane of this.planes) if (plane.userData.alive && hit.strength > 80 && reached(Math.hypot(plane.position.x - hit.x, plane.position.y * .5, plane.position.z - hit.z))) this.destroyPlane(plane, hit);
-    for (const ship of this.ships) if (ship.userData.alive && hit.strength > 90 && reached(Math.hypot(ship.position.x - hit.x, ship.position.z - hit.z))) { ship.userData.alive = false; this.onWreck(ship.position.x, 12, ship.position.z, '#a27c57', hit); }
+    for (const ship of this.ships) if (ship.userData.alive && hit.strength > 90 && reached(Math.hypot(ship.position.x - hit.x, ship.position.z - hit.z))) this.destroyShip(ship, hit);
     this.onHit(hit); this.affected = Math.min(this.population, Math.round(this.damage / 100 * 43) + this.vehiclesLost * 2); this.miniMapDirty = true; return affected;
   }
   damageBuilding(b: Building, amount: number, fire = false, blast?: Hit) {
     if (b.collapsed || b.health <= 0) return;
     const before = b.health; b.health = Math.max(0, b.health - amount); this.damage += before - b.health;
-    if (blast) { b.blast = blast; const kick = blastImpulse(b.x, b.z, blast.x, blast.z, blast.radius + b.width, blast.strength); b.tiltX = T.MathUtils.clamp(kick.vz / 350, -.3, .3); b.tiltZ = T.MathUtils.clamp(kick.vx / 350, -.3, .3); }
+    if (blast) { b.blast = blast; const kick = blast.flow ? { vx: blast.flow.x * 60, vz: blast.flow.z * 60 } : blastImpulse(b.x, b.z, blast.x, blast.z, blast.radius + b.width, blast.strength); b.tiltX = T.MathUtils.clamp(kick.vz / 350, -.3, .3); b.tiltZ = T.MathUtils.clamp(kick.vx / 350, -.3, .3); }
     if (b.health < 65) for (const part of b.parts) part.batch.color(part.id, b.color.clone().multiplyScalar(.48 + b.health / 180));
     if (fire && b.health < 80) b.fire = Math.max(b.fire, 8 + this.rng() * 20);
     if (b.health <= 0) this.startCollapse(b);
     this.miniMapDirty = true;
   }
-  inundate(level: number, minZ = -Infinity, maxZ = Infinity) {
-    if (level < 3) return;
-    for (const p of this.pedestrians) if (p.alive && p.z >= minZ && p.z <= maxZ) { p.alive = false; this.people.hide(p.id); this.heads.hide(p.extra); }
-    if (level < 5) return;
-    for (const c of this.traffic) if (c.alive && c.z >= minZ && c.z <= maxZ) { c.alive = false; this.vehiclesLost++; this.cars.color(c.id, '#3c5254'); this.cabins.hide(c.extra); }
+  inundate(surface: (x: number, z: number) => number, dt: number, strength: number, flow?: { x: number; z: number }) {
+    const depth = (x: number, z: number) => {
+      const level = surface(x, z);
+      if (flow && level <= SEA_LEVEL + .08) return 0;
+      return level - (this.terrainHeight(x, z) ?? SEA_LEVEL);
+    };
+    for (const b of this.buildings) {
+      const water = depth(b.x, b.z); if (water < .5) continue; b.fire = 0;
+      this.damageBuilding(b, dt * strength * T.MathUtils.clamp(water / Math.max(8, b.height * .45), 0, 1), false,
+        flow ? { x: b.x - flow.x * 30, z: b.z - flow.z * 30, radius: 100, strength: 130, impulse: true, flow } : undefined);
+    }
+    for (const p of this.pedestrians) if (p.alive && depth(p.x, p.z) > 1.3) { p.alive = false; this.people.hide(p.id); this.heads.hide(p.extra); }
+    for (const c of this.traffic) if (c.alive && depth(c.x, c.z) > 1.1) { c.alive = false; this.vehiclesLost++; this.cars.color(c.id, '#3c5254'); this.cabins.hide(c.extra); this.onCarFlooded(c, flow); }
+    for (const tree of this.trees) if (tree.alive && depth(tree.x, tree.z) > (flow ? 3 : 8)) { tree.alive = false; this.foliage.hide(tree.id); this.solid.hide(tree.trunk); this.onWreck(tree.x, 4, tree.z, '#617449'); }
+    for (const dock of this.docks) if (dock.alive && depth(dock.x, dock.z) > 1) this.damageDock(dock, dt * strength, { x: dock.x, z: dock.z, radius: 70, strength: 120, flow, impulse: !!flow });
+    if (flow) for (const ship of this.ships) if (ship.userData.alive && surface(ship.position.x, ship.position.z) > ship.position.y + 6) this.destroyShip(ship, { x: ship.position.x, z: ship.position.z, radius: 90, strength: 130, flow, impulse: true });
+    this.miniMapDirty = true;
   }
   startCollapse(b: Building) { b.collapse = .001; this.destroyed++; this.onCollapse(b); }
   update(dt: number, time: number) {
@@ -289,11 +374,12 @@ export class City {
     for (const c of this.traffic) if (c.alive) { if (c.axis) c.x += c.speed * dt; else c.z += c.speed * dt; const p = c.axis ? c.x : c.z; if (p > c.end || p < c.start) { if (c.axis) c.x = c.speed > 0 ? c.start : c.end; else c.z = c.speed > 0 ? c.start : c.end; } this.cars.set(c.id, c.x, .96, c.z, 2.1, 1.05, 4.5, c.axis ? Math.PI / 2 : 0); this.cabins.set(c.extra, c.x, 1.72, c.z, 1.8, .75, 2.2, c.axis ? Math.PI / 2 : 0); }
     for (const p of this.pedestrians) if (p.alive) { const panic = this.destroyed > 0 ? 2.6 : 1; if (p.axis) p.x += p.speed * dt * panic; else p.z += p.speed * dt * panic; const pos = p.axis ? p.x : p.z; if (pos > p.end || pos < p.start) p.speed *= -1; const bob = Math.sin(time * 9 + p.phase) * .065; this.people.set(p.id, p.x, 1.3 + bob, p.z, .6, 1.05, .5); this.heads.set(p.extra, p.x, 2.05 + bob, p.z, 1, 1, 1); }
     for (const plane of this.planes) {
+      if (plane.userData.gravityWell) continue;
       if (plane.userData.falling) { plane.position.y -= dt * 65; plane.position.x += dt * 25; plane.rotation.z += dt * 1.2; if (plane.position.y < 0) { plane.visible = false; plane.userData.falling = false; this.onWreck(plane.position.x, 4, plane.position.z, '#4a5458'); } }
       if (!plane.userData.alive) continue;
       const a = time * .021 + plane.userData.offset; plane.position.set(Math.cos(a) * this.extent * 1.1, 130 + plane.userData.offset * 12 + Math.sin(a * 2) * 25, Math.sin(a) * this.extent * .92); plane.userData.velocity.set(-Math.sin(a) * this.extent * 1.1 * .021, Math.cos(a * 2) * 1.05, Math.cos(a) * this.extent * .92 * .021); plane.rotation.y = Math.atan2(-plane.userData.velocity.x, -plane.userData.velocity.z); plane.rotation.z = -.1;
     }
-    for (const ship of this.ships) { if (!ship.userData.alive) { ship.position.y = Math.max(-30, ship.position.y - dt * 2); ship.rotation.z = Math.min(.7, ship.rotation.z + dt * .06); continue; } if (ship.userData.ferry) {
+    for (const ship of this.ships) { if (ship.userData.gravityWell) continue; if (!ship.userData.alive) { ship.position.y = Math.max(-42, ship.position.y - dt * 3.5); ship.rotation.z = Math.min(.95, ship.rotation.z + dt * .1); if (ship.position.y <= -40) ship.visible = false; continue; } if (ship.userData.ferry) {
         const progress = (time * 22 / ship.userData.routeLength + ship.userData.offset) % 2, direction = progress < 1 ? 1 : -1;
         const t = progress < 1 ? progress : 2 - progress, curve = ship.userData.route as T.CatmullRomCurve3;
         ship.position.copy(curve.getPointAt(T.MathUtils.clamp(t, 0, 1))); const tangent = curve.getTangentAt(T.MathUtils.clamp(t, .001, .999)); ship.rotation.y = Math.atan2(-tangent.x * direction, -tangent.z * direction);

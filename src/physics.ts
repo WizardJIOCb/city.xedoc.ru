@@ -1,7 +1,7 @@
 import type { Building, City } from './world';
 
 export type Vec = { x: number; y: number; z: number };
-export type Motion = Vec & { vx: number; vy: number; vz: number; spin: number; resting?: boolean; submerged?: boolean; impactCooldown?: number; removed?: boolean };
+export type Motion = Vec & { vx: number; vy: number; vz: number; spin: number; resting?: boolean; submerged?: boolean; impactCooldown?: number; removed?: boolean; supportLevel?: number | null; supportBuilding?: Building };
 export type Contact = { t: number; normal: Vec; building: Building };
 export type Impact = { x: number; y: number; z: number; speed: number; size: number; water: boolean; building?: Building };
 
@@ -45,13 +45,15 @@ export class CollisionWorld {
     for (const b of candidates) {
       const height = b.health <= 0 ? (b.collapsed ? 3 : 0) : b.height * (b.height > 50 && b.roof > .32 ? 1.28 : 1) + 1;
       if (!height) continue;
-      const hit = sweepBox(from, to, { x: b.x - b.width / 2 - radius, y: .6 - radius, z: b.z - b.depth / 2 - radius }, { x: b.x + b.width / 2 + radius, y: height + radius, z: b.z + b.depth / 2 + radius });
+      const offset = this.city.groundOffset(b.x, b.z);
+      const hit = sweepBox(from, to, { x: b.x - b.width / 2 - radius, y: .6 + offset - radius, z: b.z - b.depth / 2 - radius }, { x: b.x + b.width / 2 + radius, y: height + offset + radius, z: b.z + b.depth / 2 + radius });
       if (hit && (!nearest || hit.t < nearest.t)) nearest = { ...hit, building: b };
     }
     return nearest;
   }
   walkable(x: number, z: number, clearance = 1) {
-    if (this.city.terrainHeight(x, z) === null) return false;
+    const floor = this.city.terrainHeight(x, z);
+    if (floor === null || this.city.waterLevelAt(x, z) > floor + .6) return false;
     if (this.source !== this.city.buildings) this.rebuild();
     for (const b of this.cells.get(`${Math.floor(x / 64)},${Math.floor(z / 64)}`) ?? []) {
       if (!b.collapsed && Math.abs(x - b.x) < b.width / 2 + clearance && Math.abs(z - b.z) < b.depth / 2 + clearance) return false;
@@ -65,13 +67,16 @@ export class CollisionWorld {
   }
 }
 
-export function advanceBody(body: Motion, dt: number, radius: number, collision: CollisionWorld, waterLevel: number, impact: (hit: Impact) => void) {
+export function advanceBody(body: Motion, dt: number, radius: number, collision: CollisionWorld, water: number | ((x: number, z: number) => number), impact: (hit: Impact) => void) {
   if (body.removed) return;
   const steps = Math.max(1, Math.ceil(dt / (1 / 60))), h = dt / steps;
   for (let step = 0; step < steps; step++) {
     body.impactCooldown = Math.max(0, (body.impactCooldown ?? 0) - h);
     if (body.resting && Math.abs(body.vx) + Math.abs(body.vy) + Math.abs(body.vz) > .8) body.resting = false;
     const land = collision.city.terrainHeight(body.x, body.z);
+    const waterLevel = typeof water === 'number' ? water : water(body.x, body.z);
+    if (body.resting && (body.supportLevel !== land || (body.supportBuilding && body.supportBuilding.health <= 0)) && (land === null || body.y - radius > land + .3) && !collision.sweep(body, { x: body.x, y: body.y - .4, z: body.z }, radius)) body.resting = false;
+    body.supportLevel = land;
     const wet = (land === null || waterLevel > land + .2) && body.y - radius < waterLevel;
     if (wet && !body.submerged) {
       impact({ x: body.x, y: waterLevel, z: body.z, speed: Math.hypot(body.vx, body.vy, body.vz), size: radius, water: true });
@@ -90,15 +95,16 @@ export function advanceBody(body: Motion, dt: number, radius: number, collision:
       if (dot < 0) { body.vx -= 1.28 * dot * n.x; body.vy -= 1.28 * dot * n.y; body.vz -= 1.28 * dot * n.z; }
       body.vx *= .68; body.vz *= .68; body.spin *= .55;
       if (Math.abs(dot) > 4 && !body.impactCooldown) { impact({ x: body.x - n.x * radius, y: body.y - n.y * radius, z: body.z - n.z * radius, speed: Math.abs(dot), size: radius, water: false, building: contact.building }); body.impactCooldown = .18; }
-      if (n.y > .5 && Math.hypot(body.vx, body.vz) < 1 && Math.abs(body.vy) < 2) { body.resting = true; body.vx = body.vy = body.vz = body.spin = 0; }
+      if (n.y > .5 && Math.hypot(body.vx, body.vz) < 1 && Math.abs(body.vy) < 2) { body.resting = true; body.supportBuilding = contact.building; body.vx = body.vy = body.vz = body.spin = 0; }
     } else Object.assign(body, to);
     const floor = collision.city.terrainHeight(body.x, body.z);
     if (floor !== null && body.y < floor + radius && !wet) {
       const speed = Math.abs(body.vy); body.y = floor + radius; body.vy = speed * .2; body.vx *= .6; body.vz *= .6; body.spin *= .5;
       if (speed > 4 && !body.impactCooldown) { impact({ x: body.x, y: floor, z: body.z, speed, size: radius, water: false }); body.impactCooldown = .18; }
-      if (Math.hypot(body.vx, body.vz) < 1 && body.vy < 2) { body.resting = true; body.vx = body.vy = body.vz = body.spin = 0; }
+      if (Math.hypot(body.vx, body.vz) < 1 && body.vy < 2) { body.resting = true; body.supportBuilding = undefined; body.vx = body.vy = body.vz = body.spin = 0; }
     }
     // Objects keep simulating until settled or submerged, never freeze on age.
-    if (body.y < waterLevel - 34) body.removed = true;
+    // A tall passing crest must not cull street-level objects as deep-sea debris.
+    if (body.y < Math.min(-2, waterLevel) - 34) body.removed = true;
   }
 }

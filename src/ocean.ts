@@ -31,8 +31,8 @@ export class Ocean {
     const geometry = new T.PlaneGeometry(10000, 10000, 180, 180); geometry.rotateX(-Math.PI / 2);
     this.mesh = new T.Mesh(geometry, this.material); this.mesh.position.y = -2; this.mesh.userData.sunOccluder = false; scene.add(this.mesh);
   }
-  update(time: number, night: number, city: City, flood: number) {
-    this.material.uniforms.uTime.value = time; this.material.uniforms.uNight.value = night; this.mesh.position.y = -2 + flood;
+  update(time: number, night: number, city: City) {
+    this.material.uniforms.uTime.value = time; this.material.uniforms.uNight.value = night; this.mesh.position.y = -2;
     city.islands.forEach((island, i) => this.material.uniforms.uIslands.value[i].set(island.x, island.z, island.radius, island.phase));
     this.material.uniforms.uShips.value.forEach((v: T.Vector4, i: number) => { const ship = city.ships[i]; if (!ship?.userData.alive) v.set(0, 0, 0, 0); else v.set(ship.position.x, ship.position.z, -Math.sin(ship.rotation.y), -Math.cos(ship.rotation.y)); });
   }

@@ -9,6 +9,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { City } from './world';
 import { Ocean } from './ocean';
 import { Sky } from './sky';
+import { planWave } from './local-water';
 import { SunRaysPass } from './sun-rays';
 import { Squads, TEAMS } from './squads';
 import { DISASTERS, Effects, type DisasterId } from './effects';
@@ -43,6 +44,8 @@ for (let i = 0; i < 14; i++) { const a = i / 14 * Math.PI * 2, geo = new T.Spher
 const target = new T.Group();
 const targetRing = new T.Mesh(new T.RingGeometry(.982, 1, 100), new T.MeshBasicMaterial({ color: '#ffc197', transparent: true, opacity: .65, side: T.DoubleSide, depthWrite: false, depthTest: false })); targetRing.rotation.x = -Math.PI / 2; target.add(targetRing);
 const innerRing = new T.Mesh(new T.RingGeometry(.31, .315, 50), new T.MeshBasicMaterial({ color: '#ffc197', transparent: true, opacity: .32, side: T.DoubleSide, depthWrite: false })); innerRing.rotation.x = -Math.PI / 2; target.add(innerRing);
+const waveArrow = new T.Group(); const arrowMaterial = new T.LineBasicMaterial({ color: '#b1f4ed', depthTest: false, transparent: true, opacity: .9 });
+waveArrow.add(new T.Line(new T.BufferGeometry().setFromPoints([new T.Vector3(0, 0, -.72), new T.Vector3(0, 0, .65), new T.Vector3(-.16, 0, .4), new T.Vector3(0, 0, .65), new T.Vector3(.16, 0, .4)]), arrowMaterial)); waveArrow.visible = false; target.add(waveArrow);
 target.position.y = 1.5; target.visible = false; scene.add(target);
 const targetCross = new T.Mesh(new T.RingGeometry(2.2, 2.8, 4), new T.MeshBasicMaterial({ color: '#ffe1be', side: T.DoubleSide, depthWrite: false })); targetCross.rotation.x = -Math.PI / 2; scene.add(targetCross); targetCross.visible = false;
 const composer = new EffectComposer(renderer); const renderPass = new RenderPass(scene, camera); composer.addPass(renderPass);
@@ -59,7 +62,7 @@ function homeCamera() { const e = city.extent; camera.position.set(e * 1.48, e *
 homeCamera();
 function toast(title: string, description: string, name = 'meteor') { el('toast-title').textContent = title; el('toast-description').textContent = description; el('toast-icon').innerHTML = icon(name); el('toast').classList.add('show'); window.clearTimeout(toastTimer); toastTimer = window.setTimeout(() => el('toast').classList.remove('show'), 3300); }
 effects.onEvent = (name, message) => toast(name, message, DISASTERS.find(d => d.name === name)?.icon ?? 'activity');
-function setSelected(id: DisasterId) { selected = id; el('squad-options').hidden = !id.startsWith('squad_'); el('action-hint').innerHTML = icon('pointer') + (id.startsWith('squad_') ? '<span>Выберите команду. <b>Нажмите на сушу для высадки.</b></span>' : '<span>Выберите катастрофу. <b>Нажмите на город.</b></span>'); selectCard(id); const d = DISASTERS.find(d => d.id === id)!; const color = new T.Color(d.color); (targetRing.material as T.MeshBasicMaterial).color.copy(color); (innerRing.material as T.MeshBasicMaterial).color.copy(color); sound.select(); }
+function setSelected(id: DisasterId) { selected = id; waveArrow.visible = id === 'tsunami'; el('squad-options').hidden = !id.startsWith('squad_'); el('action-hint').innerHTML = icon('pointer') + (id.startsWith('squad_') ? '<span>Выберите команду. <b>Нажмите на сушу для высадки.</b></span>' : id === 'flood' ? '<span><b>Нажмите на участок:</b> земля просядет и затопится.</span>' : id === 'tsunami' ? '<span><b>Нажмите на зону.</b> Волна пройдёт по стрелке внутри круга.</span>' : '<span>Выберите катастрофу. <b>Нажмите на город.</b></span>'); selectCard(id); const d = DISASTERS.find(d => d.id === id)!; const color = new T.Color(d.color); (targetRing.material as T.MeshBasicMaterial).color.copy(color); (innerRing.material as T.MeshBasicMaterial).color.copy(color); sound.select(); }
 function pointAt(x: number, y: number) { const r = canvas.getBoundingClientRect(); pointer.set((x - r.left) / r.width * 2 - 1, -(y - r.top) / r.height * 2 + 1); raycaster.setFromCamera(pointer, camera); aimedPlane = null; const air = raycaster.intersectObjects(city.planes.filter(p => p.userData.alive), true); if (air.length) { let parent = air[0].object; while (parent.parent && !city.planes.includes(parent as T.Group)) parent = parent.parent; aimedPlane = parent as T.Group; hitPoint.copy(air[0].point); return hitPoint; } const hits = raycaster.intersectObject(city.facade.mesh); if (hits.length) { hitPoint.copy(hits[0].point); hitPoint.y = .8; return hitPoint; } return raycaster.ray.intersectPlane(ground, hitPoint); }
 const down = { pointerId: -1, x: 0, y: 0, time: 0, dragged: false, threshold: 7 }; const touches = new Set<number>(); let gesture = false;
 function clearPointer() { down.pointerId = -1; down.dragged = false; canvas.classList.remove('dragging'); }
@@ -67,7 +70,7 @@ canvas.addEventListener('pointermove', e => {
   // Latch the whole gesture, so dragging back to its start cannot fire a tool.
   if (e.pointerId === down.pointerId && Math.hypot(e.clientX - down.x, e.clientY - down.y) > down.threshold) down.dragged = true;
   if (down.dragged || gesture || (e.pointerType === 'mouse' && (e.buttons & 6))) { canvas.classList.toggle('dragging', e.pointerType === 'mouse'); target.visible = targetCross.visible = false; return; }
-  if (pointAt(e.clientX, e.clientY)) { target.position.set(hitPoint.x, 1.5, hitPoint.z); targetCross.position.set(hitPoint.x, 1.6, hitPoint.z); const def = DISASTERS.find(d => d.id === selected)!; target.scale.setScalar(def.radius * Math.sqrt(effects.power)); target.visible = !cinematic && Math.hypot(hitPoint.x, hitPoint.z) < city.worldRadius; targetCross.visible = target.visible; }
+  if (pointAt(e.clientX, e.clientY)) { target.position.set(hitPoint.x, Math.max(1.5, effects.waterAt(hitPoint.x, hitPoint.z) + 1), hitPoint.z); if (selected === 'tsunami') { const plan = planWave(city, hitPoint.x, hitPoint.z, effects.power); waveArrow.rotation.y = Math.atan2(plan.dx, plan.dz); } targetCross.position.set(hitPoint.x, 1.6, hitPoint.z); const def = DISASTERS.find(d => d.id === selected)!; target.scale.setScalar(def.radius * Math.sqrt(effects.power)); target.visible = !cinematic && Math.hypot(hitPoint.x, hitPoint.z) < city.worldRadius; targetCross.visible = target.visible; }
 });
 canvas.addEventListener('pointerleave', () => { target.visible = false; targetCross.visible = false; });
 canvas.addEventListener('pointerdown', e => {
@@ -83,7 +86,7 @@ canvas.addEventListener('pointerup', e => {
   canvas.classList.remove('dragging');
   if (!tap) return;
   if (paused) { toast('Симуляция на паузе', 'Нажмите пробел, чтобы продолжить', 'pause'); return; }
-  if (pointAt(e.clientX, e.clientY) && Math.hypot(hitPoint.x, hitPoint.z) < city.worldRadius) { if (aimedPlane && !selected.startsWith('squad_')) city.destroyPlane(aimedPlane, { x: hitPoint.x - 5, z: hitPoint.z, radius: 45, strength: 170, impulse: true }); effects.trigger(selected, hitPoint.x, hitPoint.z); }
+  if (pointAt(e.clientX, e.clientY) && Math.hypot(hitPoint.x, hitPoint.z) < city.worldRadius) { if (aimedPlane && !selected.startsWith('squad_') && !['blackhole', 'flood', 'tsunami'].includes(selected)) city.destroyPlane(aimedPlane, { x: hitPoint.x - 5, z: hitPoint.z, radius: 45, strength: 170, impulse: true }); effects.trigger(selected, hitPoint.x, hitPoint.z); }
 });
 canvas.addEventListener('pointercancel', e => { clearPointer(); touches.delete(e.pointerId); gesture = touches.size > 0; });
 canvas.addEventListener('lostpointercapture', e => { if (e.pointerId === down.pointerId) clearPointer(); });
@@ -145,7 +148,7 @@ function updateHUD() {
   const n = effects.events.filter(e => !['ring', 'bolt', 'plume'].includes(e.type)).length;
   el('event-status').textContent = n ? `Активных катастроф: ${n}` : city.destroyed ? `Разрушено зданий: ${city.destroyed}` : 'В городе всё спокойно'; el('event-dot').style.background = n ? '#f6a36b' : '#a0d6a8';
   el('squad-status').hidden = squads.fighters.length === 0; el('squad-status').textContent = squads.summary;
-  if (diagnostics) diagnostics.textContent = `SIM ${simTime.toFixed(1)}s | buildings ${city.buildings.length} | destroyed ${city.destroyed} | cars ${city.traffic.filter(c => c.alive).length}/${city.traffic.length} | pedestrians ${city.pedestrians.filter(c => c.alive).length}/${city.pedestrians.length} | planes ${city.planes.filter(c => c.userData.alive).length} | effects ${n} | debris ${effects.debris.length} | car explosions ${effects.carExplosions} | bodies ${effects.bodies.length} | blood ${effects.splats.mesh.count} | waves ${effects.waveCounter} | splashes ${effects.waterImpacts} | impacts ${effects.solidImpacts} | wall hits ${effects.buildingImpacts} | air crashes ${effects.aircraftDestroyed} | airborne ${effects.debris.filter(d => !d.resting && !d.removed).length} | squads ${squads.deployed} | troops ${squads.fighters.filter(u => u.alive).length} | shots ${squads.shots} | KIA ${squads.kills} | islands ${city.islands.length} | ferries ${city.ships.filter(s => s.userData.ferry && s.userData.alive).length} | flood ${effects.flood.toFixed(1)}m | draw calls ${renderer.info.render.calls} | triangles ${renderer.info.render.triangles} | seed ${city.seed} | map ${city.size} | power ${effects.power} | ${quality}`;
+  if (diagnostics) diagnostics.textContent = `SIM ${simTime.toFixed(1)}s | buildings ${city.buildings.length} | destroyed ${city.destroyed} | cars ${city.traffic.filter(c => c.alive).length}/${city.traffic.length} | pedestrians ${city.pedestrians.filter(c => c.alive).length}/${city.pedestrians.length} | planes ${city.planes.filter(c => c.userData.alive).length} | effects ${n} | debris ${effects.debris.length} | car explosions ${effects.carExplosions} | bodies ${effects.bodies.length} | blood ${effects.splats.mesh.count} | waves ${effects.waveCounter} | splashes ${effects.waterImpacts} | impacts ${effects.solidImpacts} | wall hits ${effects.buildingImpacts} | air crashes ${effects.aircraftDestroyed} | airborne ${effects.debris.filter(d => !d.resting && !d.removed).length} | squads ${squads.deployed} | troops ${squads.fighters.filter(u => u.alive).length} | shots ${squads.shots} | KIA ${squads.kills} | islands ${city.islands.length} | ferries ${city.ships.filter(s => s.userData.ferry && s.userData.alive).length} | sunk ships ${effects.shipsDestroyed} | docks ${effects.docksDestroyed}/${city.docks.length} | basins ${city.basins.length} | subsidence ${effects.flood.toFixed(1)}m | draw calls ${renderer.info.render.calls} | triangles ${renderer.info.render.triangles} | seed ${city.seed} | map ${city.size} | power ${effects.power} | ${quality}`;
 }
 const mini = el<HTMLCanvasElement>('minimap'), mctx = mini.getContext('2d')!;
 el('minimap-region').onclick = () => { regionMap = !regionMap; el('minimap-region').textContent = regionMap ? 'Город' : 'Регион'; el('minimap-region').setAttribute('aria-label', regionMap ? 'Показать город на мини-карте' : 'Показать острова на мини-карте'); drawMinimap(); };
@@ -173,7 +176,7 @@ function frame(now: number) {
     camera.position.add(move); controls.target.add(move); controls.target.x = T.MathUtils.clamp(controls.target.x, -city.worldRadius, city.worldRadius); controls.target.z = T.MathUtils.clamp(controls.target.z, -city.worldRadius, city.worldRadius); controls.update();
     night = T.MathUtils.lerp(night, nightTarget, Math.min(1, rawDt * 1.4)); city.night.value = night;
     sky.update(camera.position, night, sunEnabled); sun.position.copy(sky.sunDirection).multiplyScalar(800);
-    ocean.material.uniforms.uSunDirection.value.copy(sky.sunDirection); ocean.update(simTime, night, city, effects.flood);
+    ocean.material.uniforms.uSunDirection.value.copy(sky.sunDirection); ocean.update(simTime, night, city);
     sunRays.direction.copy(sky.sunDirection); sunRays.daylight = Math.pow(1 - night, 1.5); sunRays.enabled = raysEnabled && sunRays.daylight > .005;
     const fogColor = new T.Color('#8aaeb9').lerp(new T.Color('#1a263d'), night); (scene.fog as T.FogExp2).color.copy(fogColor); scene.background = fogColor;
     sun.intensity = 2.15 - night * 1.85; sun.color.set('#ffe0b0').lerp(new T.Color('#8dacf4'), night); ambient.intensity = 1.35 - night * .65; renderer.toneMappingExposure = .94 + night * .06; bloom.strength = .15 + night * .35;

@@ -106,13 +106,14 @@ export class Squads {
     for (const u of this.fighters) {
       u.age += dt; u.fireClock -= dt; u.pathClock -= dt;
       if (!u.alive) {
-        advanceBody(u, dt, .6, this.city.collision, -2 + this.effects.flood, hit => this.effects.impact(hit));
+        advanceBody(u, dt, .6, this.city.collision, this.effects.waterAt, hit => this.effects.impact(hit));
         if (u.resting) { u.rx = Math.PI / 2; u.rz = 0; } else { u.rx += u.spin * dt; u.rz += u.spin * dt * .3; }
       } else if (u.dropping) {
         u.y -= dt * 15; const floor = (this.city.terrainHeight(u.x, u.z) ?? -2) + 1.9;
         if (u.y <= floor) { u.y = floor; u.dropping = false; this.effects.impact({ x: u.x, y: floor - 1.9, z: u.z, speed: 6, size: .5, water: false }); }
       } else {
-        if (this.effects.flood > u.y + 1) { this.die(u); continue; }
+        u.y = (this.city.terrainHeight(u.x, u.z) ?? -2) + 1.9;
+        if (this.effects.waterAt(u.x, u.z) > u.y + .2) { this.die(u); continue; }
         let nearest: Fighter | undefined, distance = Infinity;
         for (const other of this.fighters) if (other.alive && !other.dropping && other.team !== u.team) { const d = Math.hypot(other.x - u.x, other.z - u.z); if (d < distance) { nearest = other; distance = d; } }
         u.target = nearest;
