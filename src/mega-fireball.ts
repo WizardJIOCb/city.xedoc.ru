@@ -7,15 +7,15 @@ export const MEGA_FIREBALL_DURATION = 8;
 export class MegaFireball extends T.Mesh<T.BoxGeometry, T.ShaderMaterial> {
   constructor(public blastRadius: number) {
     super(new T.BoxGeometry(2, 2, 2), new T.ShaderMaterial({
-      transparent: true, depthWrite: false, side: T.BackSide,
-      uniforms: { uEye: { value: new T.Vector3() }, uClipMatrix: { value: new T.Matrix4() }, uAge: { value: 0 }, uOpacity: { value: 0 } },
+      transparent: true, depthWrite: false, side: T.BackSide, allowOverride: false,
+      uniforms: { uEye: { value: new T.Vector3() }, uClipMatrix: { value: new T.Matrix4() }, uAge: { value: 0 }, uOpacity: { value: 0 }, uRenderVolume: { value: 1 } },
       vertexShader: `varying vec3 vLocal;
         void main(){vLocal=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
       fragmentShader: `
         varying vec3 vLocal;
         uniform vec3 uEye;
         uniform mat4 uClipMatrix;
-        uniform float uAge,uOpacity;
+        uniform float uAge,uOpacity,uRenderVolume;
         float hash(vec3 p){p=fract(p*.3183099+vec3(.17,.31,.73));p*=17.;return fract(p.x*p.y*p.z*(p.x+p.y+p.z));}
         float noise(vec3 p){
           vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
@@ -24,6 +24,7 @@ export class MegaFireball extends T.Mesh<T.BoxGeometry, T.ShaderMaterial> {
         }
         float billows(vec3 p){return noise(p)*.57+noise(p*2.07+7.1)*.29+noise(p*4.13+13.7)*.14;}
         void main(){
+          if(uRenderVolume<.5)discard;
           vec3 ray=normalize(vLocal-uEye);
           float b=dot(uEye,ray),c=dot(uEye,uEye)-1.,disc=b*b-c;
           if(disc<=0.)discard;
@@ -62,7 +63,10 @@ export class MegaFireball extends T.Mesh<T.BoxGeometry, T.ShaderMaterial> {
         }`
     }));
     this.name = 'mega-fireball'; this.renderOrder = 3;
-    this.onBeforeRender = (_renderer, _scene, camera) => {
+    this.onBeforeRender = (_renderer, scene, camera) => {
+      // SSAO replaces mesh materials to collect solid normals/depth. Keep this
+      // shader and discard that pass so the proxy box never becomes an occluder.
+      this.material.uniforms.uRenderVolume.value = scene.overrideMaterial ? 0 : 1;
       camera.getWorldPosition(this.material.uniforms.uEye.value);
       this.worldToLocal(this.material.uniforms.uEye.value);
       this.material.uniforms.uClipMatrix.value.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).multiply(this.matrixWorld);

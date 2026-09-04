@@ -1,9 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Scene } from 'three';
+import { Scene, PerspectiveCamera, MeshNormalMaterial } from 'three';
+import { MegaFireball } from '../src/mega-fireball.ts';
 import { City } from '../src/world.ts';
 import { Effects } from '../src/effects.ts';
 import { Sound } from '../src/audio.ts';
+
+test('fireball proxy contributes no solid box to the SSAO override pass', () => {
+  const scene = new Scene(), camera = new PerspectiveCamera(43, 1, 1, 8500), mesh = new MegaFireball(220);
+  scene.add(mesh); mesh.update(2); camera.position.set(800, 650, 1000); camera.lookAt(mesh.position); camera.updateMatrixWorld(); scene.updateMatrixWorld(true);
+  const opacity = mesh.material.uniforms.uOpacity.value;
+  assert.equal(mesh.material.allowOverride, false, 'normal material must not replace the volume shader');
+  scene.overrideMaterial = new MeshNormalMaterial();
+  mesh.onBeforeRender(null, scene, camera);
+  assert.equal(mesh.material.uniforms.uRenderVolume.value, 0, 'proxy must discard the normals/depth pass');
+  scene.overrideMaterial.dispose(); scene.overrideMaterial = null;
+  mesh.onBeforeRender(null, scene, camera);
+  assert.equal(mesh.material.uniforms.uRenderVolume.value, 1, 'fire must still render in the color pass');
+  assert.equal(mesh.material.uniforms.uOpacity.value, opacity, 'render passes must not advance or fade the simulation');
+  mesh.geometry.dispose(); mesh.material.dispose();
+});
 
 test('mega blast keeps an expanding fire volume after sparks expire, pauses and disposes it', () => {
   const scene = new Scene(), city = new City(scene, 'FIREBALL', 14), fx = new Effects(scene, city, new Sound());
