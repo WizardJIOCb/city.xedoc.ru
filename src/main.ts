@@ -8,6 +8,8 @@ import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { City } from './world';
 import { Ocean } from './ocean';
+import { Sky } from './sky';
+import { SunRaysPass } from './sun-rays';
 import { Squads, TEAMS } from './squads';
 import { DISASTERS, Effects, type DisasterId } from './effects';
 import { Sound } from './audio';
@@ -33,8 +35,7 @@ controls.mouseButtons = { LEFT: T.MOUSE.PAN, MIDDLE: T.MOUSE.PAN, RIGHT: T.MOUSE
 const ambient = new T.HemisphereLight('#cce8ff', '#a79470', 1.35); scene.add(ambient);
 const sun = new T.DirectionalLight('#ffe3b9', 3.1); sun.position.set(-330, 620, 400); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048); sun.shadow.camera.left = -800; sun.shadow.camera.right = 800; sun.shadow.camera.top = 800; sun.shadow.camera.bottom = -800; sun.shadow.camera.far = 2000; sun.shadow.normalBias = 1; sun.shadow.bias = -.00015; scene.add(sun);
 const envGenerator = new T.PMREMGenerator(renderer), room = new RoomEnvironment(); const environment = envGenerator.fromScene(room, .04); scene.environment = environment.texture; scene.environmentIntensity = .3; room.dispose(); envGenerator.dispose();
-const skyMat = new T.ShaderMaterial({ side: T.BackSide, depthWrite: false, uniforms: { uNight: { value: 0 } }, vertexShader: 'varying vec3 vPos;void main(){vPos=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}', fragmentShader: `varying vec3 vPos;uniform float uNight;void main(){vec3 dir=normalize(vPos);float h=max(0.,dir.y);vec3 day=mix(vec3(.66,.80,.82),vec3(.30,.56,.69),pow(h,.65));vec3 night=mix(vec3(.17,.22,.34),vec3(.035,.07,.15),h);float s=pow(max(0.,dot(dir,normalize(vec3(-.48,.48,.55)))),320.);gl_FragColor=vec4(mix(day,night,uNight)+vec3(1.,.72,.35)*s*(1.-uNight)*1.3,1.);}` });
-const sky = new T.Mesh(new T.SphereGeometry(4500, 24, 16), skyMat); scene.add(sky);
+const sky = new Sky(); scene.add(sky);
 const ocean = new Ocean(scene, camera);
 // Atmospheric landforms beyond the playable islands.
 const mountainGroup = new T.Group(); scene.add(mountainGroup);
@@ -46,12 +47,13 @@ target.position.y = 1.5; target.visible = false; scene.add(target);
 const targetCross = new T.Mesh(new T.RingGeometry(2.2, 2.8, 4), new T.MeshBasicMaterial({ color: '#ffe1be', side: T.DoubleSide, depthWrite: false })); targetCross.rotation.x = -Math.PI / 2; scene.add(targetCross); targetCross.visible = false;
 const composer = new EffectComposer(renderer); const renderPass = new RenderPass(scene, camera); composer.addPass(renderPass);
 const ao = new SSAOPass(scene, camera, innerWidth, innerHeight, 16); ao.kernelRadius = 12; ao.minDistance = .0005; ao.maxDistance = .045; composer.addPass(ao);
+const sunRays = new SunRaysPass(scene, camera); composer.addPass(sunRays);
 const bloom = new UnrealBloomPass(new T.Vector2(innerWidth, innerHeight), .25, .45, .91); composer.addPass(bloom); composer.addPass(new OutputPass());
 let city = new City(scene), sound = new Sound(), effects = new Effects(scene, city, sound);
 const squads = new Squads(scene, city, effects); effects.onDeploy = (kind, x, z) => squads.deploy(kind, x, z);
 let aimedPlane: T.Group | null = null; let regionMap = false;
 let selected: DisasterId = 'meteor', speed = 1, paused = false, simTime = 0, night = 0, nightTarget = 0, dayMode = 0, cinematic = false, preset = 'bay', pendingPreset = 'bay', quality = 'high';
-let shakeEnabled = true, flashEnabled = true, toastTimer = 0, fpsFrames = 0, fpsTime = 0, hudClock = 0, mapClock = 0, generating = false, lastNow = performance.now();
+let shakeEnabled = true, flashEnabled = true, sunEnabled = true, raysEnabled = true, toastTimer = 0, fpsFrames = 0, fpsTime = 0, hudClock = 0, mapClock = 0, generating = false, lastNow = performance.now();
 const raycaster = new T.Raycaster(), pointer = new T.Vector2(), ground = new T.Plane(new T.Vector3(0, 1, 0), -.8), hitPoint = new T.Vector3(), pressed = new Set<string>();
 function homeCamera() { const e = city.extent; camera.position.set(e * 1.48, e * 1.20, e * 1.78); controls.target.set(0, 8, 0); controls.update(); }
 homeCamera();
@@ -127,12 +129,14 @@ window.addEventListener('keydown', e => {
   const n = Number(e.key); if (n >= 1 && n <= 9) { const d = DISASTERS[n - 1]; setSelected(d.id); const selectedCard = document.querySelector<HTMLElement>(`[data-disaster="${d.id}"]`)!; if (selectedCard.hidden) document.querySelector<HTMLButtonElement>('[data-category="all"]')!.click(); selectedCard.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }); }
 });
 window.addEventListener('keyup', e => pressed.delete(e.code)); window.addEventListener('blur', () => pressed.clear());
-function setQuality(value: string, persist = true) { quality = value; renderer.setPixelRatio(Math.min(devicePixelRatio, value === 'high' ? 1.5 : value === 'medium' ? 1 : .75)); renderer.shadowMap.enabled = value !== 'low'; bloom.enabled = value === 'high'; ao.enabled = value === 'high'; renderPass.enabled = true; resize(); if (persist) saveSettings(); }
-function saveSettings() { try { localStorage.setItem('crushcity.settings', JSON.stringify({ quality, shakeEnabled, flashEnabled, sound: sound.enabled, soundPreferenceVersion: 1, blood: effects.bloodEnabled })); } catch { /* Storage is optional. */ } }
+function setQuality(value: string, persist = true) { quality = value; renderer.setPixelRatio(Math.min(devicePixelRatio, value === 'high' ? 1.5 : value === 'medium' ? 1 : .75)); renderer.shadowMap.enabled = value !== 'low'; bloom.enabled = value === 'high'; ao.enabled = value === 'high'; sunRays.setQuality(value); renderPass.enabled = true; resize(); if (persist) saveSettings(); }
+function saveSettings() { try { localStorage.setItem('crushcity.settings', JSON.stringify({ quality, shakeEnabled, flashEnabled, sunEnabled, raysEnabled, sound: sound.enabled, soundPreferenceVersion: 1, blood: effects.bloodEnabled })); } catch { /* Storage is optional. */ } }
+el<HTMLInputElement>('sun-enabled').onchange = e => { sunEnabled = (e.target as HTMLInputElement).checked; saveSettings(); };
+el<HTMLInputElement>('rays-enabled').onchange = e => { raysEnabled = (e.target as HTMLInputElement).checked; saveSettings(); };
 el<HTMLSelectElement>('quality').onchange = e => setQuality((e.target as HTMLSelectElement).value);
 el<HTMLInputElement>('blood-enabled').onchange = e => { effects.setBloodEnabled((e.target as HTMLInputElement).checked); saveSettings(); };
 el<HTMLInputElement>('shake-enabled').onchange = e => { shakeEnabled = (e.target as HTMLInputElement).checked; saveSettings(); }; el<HTMLInputElement>('flash-enabled').onchange = e => { flashEnabled = (e.target as HTMLInputElement).checked; saveSettings(); };
-try { const s = JSON.parse(localStorage.getItem('crushcity.settings') || '{}'); if (['low', 'medium', 'high'].includes(s.quality)) { el<HTMLSelectElement>('quality').value = s.quality; setQuality(s.quality, false); } if (s.shakeEnabled === false) el<HTMLInputElement>('shake-enabled').checked = shakeEnabled = false; if (s.flashEnabled === false) el<HTMLInputElement>('flash-enabled').checked = flashEnabled = false; if (s.blood === false) { effects.setBloodEnabled(false); el<HTMLInputElement>('blood-enabled').checked = false; } if (s.soundPreferenceVersion === 1 && s.sound === true) sound.enabled = true; } catch { /* Ignore corrupt settings. */ }
+try { const s = JSON.parse(localStorage.getItem('crushcity.settings') || '{}'); if (['low', 'medium', 'high'].includes(s.quality)) { el<HTMLSelectElement>('quality').value = s.quality; setQuality(s.quality, false); } if (s.sunEnabled === false) el<HTMLInputElement>('sun-enabled').checked = sunEnabled = false; if (s.raysEnabled === false) el<HTMLInputElement>('rays-enabled').checked = raysEnabled = false; if (s.shakeEnabled === false) el<HTMLInputElement>('shake-enabled').checked = shakeEnabled = false; if (s.flashEnabled === false) el<HTMLInputElement>('flash-enabled').checked = flashEnabled = false; if (s.blood === false) { effects.setBloodEnabled(false); el<HTMLInputElement>('blood-enabled').checked = false; } if (s.soundPreferenceVersion === 1 && s.sound === true) sound.enabled = true; } catch { /* Ignore corrupt settings. */ }
 el('sound').innerHTML = icon(sound.enabled ? 'volume' : 'mute'); el('sound').setAttribute('aria-label', sound.enabled ? 'Выключить звук' : 'Включить звук');
 function resize() { camera.aspect = innerWidth / innerHeight; if (!cinematic) camera.setViewOffset(innerWidth, innerHeight, 0, Math.min(95, innerHeight * .12), innerWidth, innerHeight); else camera.clearViewOffset(); camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(innerWidth, innerHeight); effects.fire.material.uniforms.uScale.value = innerHeight; effects.smoke.material.uniforms.uScale.value = innerHeight; effects.blood.material.uniforms.uScale.value = innerHeight; effects.sprayWater.material.uniforms.uScale.value = innerHeight; }
 window.addEventListener('resize', resize); resize();
@@ -167,7 +171,10 @@ function frame(now: number) {
     const advance = camera.position.distanceTo(controls.target) * rawDt * .55, forward = new T.Vector3(); camera.getWorldDirection(forward); forward.y = 0; forward.normalize(); const right = new T.Vector3().crossVectors(forward, camera.up).normalize(), move = new T.Vector3();
     if (pressed.has('KeyW') || pressed.has('ArrowUp')) move.addScaledVector(forward, advance); if (pressed.has('KeyS') || pressed.has('ArrowDown')) move.addScaledVector(forward, -advance); if (pressed.has('KeyD') || pressed.has('ArrowRight')) move.addScaledVector(right, advance); if (pressed.has('KeyA') || pressed.has('ArrowLeft')) move.addScaledVector(right, -advance);
     camera.position.add(move); controls.target.add(move); controls.target.x = T.MathUtils.clamp(controls.target.x, -city.worldRadius, city.worldRadius); controls.target.z = T.MathUtils.clamp(controls.target.z, -city.worldRadius, city.worldRadius); controls.update();
-    night = T.MathUtils.lerp(night, nightTarget, Math.min(1, rawDt * 1.4)); city.night.value = night; ocean.update(simTime, night, city, effects.flood); skyMat.uniforms.uNight.value = night;
+    night = T.MathUtils.lerp(night, nightTarget, Math.min(1, rawDt * 1.4)); city.night.value = night;
+    sky.update(camera.position, night, sunEnabled); sun.position.copy(sky.sunDirection).multiplyScalar(800);
+    ocean.material.uniforms.uSunDirection.value.copy(sky.sunDirection); ocean.update(simTime, night, city, effects.flood);
+    sunRays.direction.copy(sky.sunDirection); sunRays.daylight = Math.pow(1 - night, 1.5); sunRays.enabled = raysEnabled && sunRays.daylight > .005;
     const fogColor = new T.Color('#8aaeb9').lerp(new T.Color('#1a263d'), night); (scene.fog as T.FogExp2).color.copy(fogColor); scene.background = fogColor;
     sun.intensity = 2.15 - night * 1.85; sun.color.set('#ffe0b0').lerp(new T.Color('#8dacf4'), night); ambient.intensity = 1.35 - night * .65; renderer.toneMappingExposure = .94 + night * .06; bloom.strength = .15 + night * .35;
     const savedPosition = camera.position.clone(); if (shakeEnabled && effects.shake > .02 && !paused) { camera.position.x += (Math.random() - .5) * effects.shake * 2; camera.position.y += (Math.random() - .5) * effects.shake; camera.updateMatrixWorld(); }
