@@ -31,12 +31,12 @@ export class Batch {
 }
 type Part = { batch: Batch; id: number; x: number; y: number; z: number; sx: number; sy: number; sz: number };
 export type Building = { x: number; z: number; width: number; depth: number; height: number; hue: number; centrality: number; roof: number; health: number; fire: number; collapsed: boolean; collapse: number; parts: Part[]; color: T.Color; tiltX: number; tiltZ: number; blast?: Hit; };
-export type Citizen = { x: number; z: number; axis: boolean; start: number; end: number; speed: number; id: number; extra: number; alive: boolean; phase: number; };
+export type Citizen = { x: number; z: number; axis: boolean; start: number; end: number; speed: number; id: number; extra: number; alive: boolean; phase: number; health?: number; };
 export type Island = { x: number; z: number; radius: number; phase: number; name: string; dock: T.Vector3 };
-export type Hit = { x: number; z: number; radius: number; strength: number; fire?: boolean; impulse?: boolean; flow?: { x: number; z: number }; waveId?: number; front?: { previous: number; current: number }; };
+export type Hit = { x: number; z: number; radius: number; strength: number; fire?: boolean; impulse?: boolean; column?: { bottom: number; top: number }; groundOnly?: boolean; flow?: { x: number; z: number }; waveId?: number; front?: { previous: number; current: number }; };
 export type DockSection = { x: number; y: number; z: number; width: number; depth: number; height: number; rotation: number; ids: number[]; health: number; alive: boolean };
 export class City {
-  group = new T.Group(); buildings: Building[] = []; trees: { x: number; z: number; id: number; trunk: number; alive: boolean }[] = [];
+  group = new T.Group(); buildings: Building[] = []; trees: { x: number; z: number; id: number; trunk: number; alive: boolean; health?: number }[] = [];
   layout: ReturnType<typeof generateLayout>; extent: number; rng: () => number;
   solid: Batch; facade: Batch; foliage: Batch; cars: Batch; cabins: Batch; people: Batch; heads: Batch;
   traffic: Citizen[] = []; pedestrians: Citizen[] = []; planes: T.Group[] = []; ships: T.Group[] = [];
@@ -45,13 +45,14 @@ export class City {
   onWreck: (x: number, y: number, z: number, color: T.ColorRepresentation, hit?: Hit) => void = () => {};
   onCarExplosion: (car: Citizen, hit: Hit) => void = () => {};
   onDeath: (person: Citizen, hit: Hit) => void = () => {};
-  props: { x: number; y: number; z: number; ids: number[]; alive: boolean; }[] = [];
+  props: { x: number; y: number; z: number; ids: number[]; alive: boolean; health?: number }[] = [];
   islands: Island[] = []; collision: CollisionWorld; worldRadius = 0;
   landCells = new Set<string>(); terrainRects: { x: number; z: number; width: number; depth: number; y: number }[] = [];
   onPlaneDestroyed: (plane: T.Group, hit: Hit) => void = () => {};
   onShipDestroyed: (ship: T.Group, hit: Hit) => void = () => {};
   onDockDestroyed: (dock: DockSection, hit: Hit) => void = () => {};
   onCarFlooded: (car: Citizen, flow?: { x: number; z: number }) => void = () => {};
+  onCarLifted: (car: Citizen, hit: Hit) => void = () => {};
   docks: DockSection[] = []; basins: Basin[] = []; private groundCache = new Map<string, number>();
   private dockCells = new Map<string, DockSection[]>();
   waterLevelAt: (x: number, z: number) => number = () => SEA_LEVEL;
@@ -304,6 +305,11 @@ export class City {
   hit(hit: Hit) {
     let affected = 0;
     const reached = (distance: number, scale = 1) => distance < hit.radius * scale && (!hit.front || (distance > hit.front.previous && distance <= hit.front.current));
+    const damageObject = (object: { health?: number }, distance: number, resistance: number) => {
+      if (!reached(distance)) return false;
+      object.health = Math.max(0, (object.health ?? 100) - blastDamage(distance, hit.radius, hit.strength, resistance));
+      return object.health <= 0;
+    };
     for (const b of this.buildings) {
       if (b.collapsed || b.health <= 0) continue;
       const d = Math.max(0, Math.hypot(b.x - hit.x, b.z - hit.z) - b.width * .45);
@@ -312,17 +318,25 @@ export class City {
       if (amount < .01) continue;
       this.damageBuilding(b, amount, hit.fire, hit.impulse ? hit : undefined); affected++;
     }
-    for (const t of this.trees) if (t.alive && reached(Math.hypot(t.x - hit.x, t.z - hit.z), .85) && hit.strength > 30) { t.alive = false; this.foliage.hide(t.id); this.solid.hide(t.trunk); this.onWreck(t.x, 4, t.z, '#617449', hit); }
-    for (const car of this.traffic) if (car.alive && reached(Math.hypot(car.x - hit.x, car.z - hit.z), .9) && hit.strength > 25) {
+    for (const t of this.trees) if (t.alive && damageObject(t, Math.hypot(t.x - hit.x, t.z - hit.z), .45)) { t.alive = false; this.foliage.hide(t.id); this.solid.hide(t.trunk); this.onWreck(t.x, 4, t.z, '#617449', hit); }
+    for (const car of this.traffic) if (car.alive && damageObject(car, Math.hypot(car.x - hit.x, car.z - hit.z), .35)) {
       // Mark dead before the callback: secondary explosions must not retrigger this car.
       car.alive = false; this.vehiclesLost++; this.cars.color(car.id, '#292b29'); this.cabins.hide(car.extra); this.onCarExplosion(car, hit);
     }
     for (const p of this.pedestrians) if (p.alive && reached(Math.hypot(p.x - hit.x, p.z - hit.z)) && hit.strength > 10) { p.alive = false; this.onDeath(p, hit); }
-    for (const p of this.props) if (p.alive && hit.strength > 50 && reached(Math.hypot(p.x - hit.x, p.z - hit.z), .85)) { p.alive = false; for (const id of p.ids) this.solid.hide(id); this.onWreck(p.x, p.y, p.z, '#7c8581', hit); }
+    for (const p of this.props) if (p.alive && damageObject(p, Math.hypot(p.x - hit.x, p.z - hit.z), .6)) { p.alive = false; for (const id of p.ids) this.solid.hide(id); this.onWreck(p.x, p.y, p.z, '#7c8581', hit); }
     for (const dock of this.docks) if (dock.alive) { const distance = Math.max(0, Math.hypot(dock.x - hit.x, dock.z - hit.z) - Math.min(dock.width, dock.depth) * .4); if (reached(distance)) this.damageDock(dock, blastDamage(distance, hit.radius, hit.strength, .65), hit); }
-    for (const plane of this.planes) if (plane.userData.alive && hit.strength > 80 && reached(Math.hypot(plane.position.x - hit.x, plane.position.y * .5, plane.position.z - hit.z))) this.destroyPlane(plane, hit);
-    for (const ship of this.ships) if (ship.userData.alive && hit.strength > 90 && reached(Math.hypot(ship.position.x - hit.x, ship.position.z - hit.z))) this.destroyShip(ship, hit);
+    for (const plane of this.planes) if (plane.userData.alive && !plane.userData.gravityWell && !hit.groundOnly) {
+      if (hit.column && (plane.position.y < hit.column.bottom || plane.position.y > hit.column.top)) continue;
+      const distance = Math.hypot(plane.position.x - hit.x, hit.column ? 0 : plane.position.y * .5, plane.position.z - hit.z);
+      if (damageObject(plane.userData, distance, .8)) this.destroyPlane(plane, hit);
+    }
+    for (const ship of this.ships) if (ship.userData.alive && !ship.userData.gravityWell && damageObject(ship.userData, Math.hypot(ship.position.x - hit.x, ship.position.z - hit.z), 1)) this.destroyShip(ship, hit);
     this.onHit(hit); this.affected = Math.min(this.population, Math.round(this.damage / 100 * 43) + this.vehiclesLost * 2); this.miniMapDirty = true; return affected;
+  }
+  liftCar(car: Citizen, hit: Hit) {
+    if (!car.alive) return;
+    car.alive = false; car.health = 0; this.vehiclesLost++; this.onCarLifted(car, hit); this.miniMapDirty = true;
   }
   damageBuilding(b: Building, amount: number, fire = false, blast?: Hit) {
     if (b.collapsed || b.health <= 0) return;
@@ -349,6 +363,7 @@ export class City {
     for (const tree of this.trees) if (tree.alive && depth(tree.x, tree.z) > (flow ? 3 : 8)) { tree.alive = false; this.foliage.hide(tree.id); this.solid.hide(tree.trunk); this.onWreck(tree.x, 4, tree.z, '#617449'); }
     for (const dock of this.docks) if (dock.alive && depth(dock.x, dock.z) > 1) this.damageDock(dock, dt * strength, { x: dock.x, z: dock.z, radius: 70, strength: 120, flow, impulse: !!flow });
     if (flow) for (const ship of this.ships) if (ship.userData.alive && surface(ship.position.x, ship.position.z) > ship.position.y + 6) this.destroyShip(ship, { x: ship.position.x, z: ship.position.z, radius: 90, strength: 130, flow, impulse: true });
+    for (const plane of this.planes) if (plane.userData.alive && surface(plane.position.x, plane.position.z) > plane.position.y + 2) this.destroyPlane(plane, { x: plane.position.x, z: plane.position.z, radius: 60, strength: 160, flow, impulse: !!flow });
     this.miniMapDirty = true;
   }
   startCollapse(b: Building) { b.collapse = .001; this.destroyed++; this.onCollapse(b); }

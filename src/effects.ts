@@ -11,7 +11,7 @@ export const DISASTERS = [
   { id: 'bomb', name: 'Авиабомба', sub: 'Точный удар', icon: 'bomb', color: '#f8b96f', radius: 65, category: 'weapons' },
   { id: 'cluster', name: 'Ковровый удар', sub: 'Целый квартал', icon: 'crosshair', color: '#f89e6c', radius: 135, category: 'weapons' },
   { id: 'nuke', name: 'Мегавзрыв', sub: 'Новая точка отсчёта', icon: 'radiation', color: '#ffc270', radius: 220, category: 'weapons' },
-  { id: 'tornado', name: 'Торнадо', sub: 'Город на взлёт', icon: 'tornado', color: '#b8cfe0', radius: 78, category: 'nature' },
+  { id: 'tornado', name: 'Торнадо', sub: 'Город на взлёт', icon: 'tornado', color: '#b8cfe0', radius: 110, category: 'nature' },
   { id: 'tsunami', name: 'Цунами', sub: 'Волна в выбранной зоне', icon: 'waves', color: '#75d6e7', radius: 160, category: 'nature' },
   { id: 'quake', name: 'Землетрясение', sub: 'Всё нестабильно', icon: 'activity', color: '#e8b183', radius: 210, category: 'nature' },
   { id: 'storm', name: 'Гроза', sub: 'Высокое напряжение', icon: 'zap', color: '#acb9ff', radius: 150, category: 'nature' },
@@ -50,7 +50,7 @@ class Particles {
   clear() { this.items = []; this.alphas.fill(0); this.sizes.fill(0); this.cursor = 0; this.update(0); }
 }
 type Debris = Motion & { id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; rz: number; spin: number; sx: number; sy: number; sz: number; life: number; waveId?: number; };
-type ThrownActor = Motion & { source: Citizen; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; ry: number; rz: number; spin: number; age: number; landed: boolean; limbs?: number[]; waveId?: number; };
+type ThrownActor = Motion & { source: Citizen; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; ry: number; rz: number; spin: number; age: number; landed: boolean; lifted?: boolean; limbs?: number[]; waveId?: number; };
 type Event = { type: DisasterId | 'bolt' | 'ring' | 'plume' | 'fireball'; x: number; z: number; age: number; duration: number; power: number; group: T.Group; tick: number; data: Record<string, any>; };
 export class Effects {
   fire: Particles; smoke: Particles; debrisBatch: Batch; debris: Debris[] = []; debrisCursor = 0; events: Event[] = [];
@@ -59,6 +59,7 @@ export class Effects {
   sprayWater: Particles; rippleBatch: Batch; ripples: { id: number; x: number; y: number; z: number; age: number; size: number }[] = []; rippleCursor = 0; rippleOpacity = new Float32Array(180);
   waterImpacts = 0; solidImpacts = 0; buildingImpacts = 0; aircraftDestroyed = 0; impactSoundCooldown = 0;
   shipsDestroyed = 0; docksDestroyed = 0; floodClock = 0;
+  carsLifted = 0; aircraftCaptured = 0; shipsCaptured = 0;
   private waterWaves = new Set<Event>();
   onDeploy: (kind: string, x: number, z: number) => boolean = () => false;
   carExplosions = 0; deaths = 0; waveCounter = 0; carSoundCooldown = 0;
@@ -86,6 +87,10 @@ export class Effects {
   attachCity(city: City) {
     this.city = city; city.onPlaneDestroyed = (plane, hit) => this.breakAircraft(plane, hit); city.onCollapse = b => this.collapse(b); city.onFire = b => this.burn(b);
     city.onCarExplosion = (car, hit) => this.explodeCar(car, hit); city.onDeath = (person, hit) => this.killPerson(person, hit);
+    city.onCarLifted = (car, hit) => {
+      const actor = this.actor(car, hit, 1.4); actor.lifted = true; actor.vy = 14; actor.spin = 3;
+      this.wrecks.push(actor); this.carsLifted++;
+    };
     city.onShipDestroyed = (ship, hit) => this.breakShip(ship, hit); city.onDockDestroyed = (dock, hit) => this.breakDock(dock, hit);
     city.onCarFlooded = (car, flow) => { const actor = this.actor(car, { x: car.x, z: car.z, radius: 30, strength: 80, flow, impulse: !!flow }, 1.5); actor.vy = 1; this.wrecks.push(actor); this.impact({ x: car.x, y: this.waterAt(car.x, car.z), z: car.z, speed: flow ? 25 : 7, size: 1.2, water: true }); };
     city.waterLevelAt = this.waterAt;
@@ -231,7 +236,7 @@ export class Effects {
     } else if (type === 'cluster') {
       const e = this.event(type, x, z, 4.2, p); e.data.next = 0;
     } else if (type === 'tornado') {
-      const e = this.event(type, x, z, 22, p);
+      const e = this.event(type, x, z, 22, p); e.data.captured = new Set<T.Group>(); e.group.scale.setScalar(Math.sqrt(p));
       for (let i = 0; i < 30; i++) {
         const mesh = new T.Mesh(new T.TorusGeometry(8 + i * 1.4, 3 + i * .14, 5, 28), new T.MeshStandardMaterial({ color: new T.Color().setHSL(.58, .04, .19 + i * .004), transparent: true, opacity: .5, roughness: 1 })); mesh.rotation.x = Math.PI / 2; mesh.position.y = i * 5.5; e.group.add(mesh);
       }
@@ -277,6 +282,7 @@ export class Effects {
     const e = this.event('bolt', x, z, .3, power), points: T.Vector3[] = [];
     for (let i = 0; i <= 12; i++) points.push(new T.Vector3(i === 12 ? 0 : (Math.random() - .5) * 32, 260 - i / 12 * 260, (Math.random() - .5) * 14));
     e.group.add(new T.Mesh(new T.TubeGeometry(new T.CatmullRomCurve3(points), 40, 1.5, 4, false), new T.MeshBasicMaterial({ color: '#d6dfff' })));
+    this.city.hit({ x, z, radius: 35 * Math.sqrt(power), strength: 110 * power, fire: true, column: { bottom: -30, top: 300 } });
     this.explosion(x, z, 35 * Math.sqrt(power), 100 * power); this.flash = .25;
   }
   shockwave(e: Event) {
@@ -305,12 +311,13 @@ export class Effects {
       const body = !!actor.limbs; actor.age += dt;
       advanceBody(actor, dt, body ? .4 : .9, this.city.collision, this.waterAt, hit => {
         this.impact(hit);
+        if (actor.lifted && hit.speed > 12) { actor.lifted = false; this.city.cabins.hide(actor.source.extra); this.city.cars.color(actor.source.id, '#333c3b'); }
         if (body && !hit.water && !actor.landed) { this.spray(actor.x, actor.y, actor.z, actor.vx, actor.vz, 12); this.splatter(actor.x, actor.z, 1.8); }
       });
       actor.landed = !!actor.resting;
       if (!actor.resting) { actor.rx += actor.spin * dt; actor.rz += actor.spin * dt * .4; }
       else if (body) { actor.rx = T.MathUtils.lerp(actor.rx, Math.PI / 2, Math.min(1, dt * 10)); actor.rz *= Math.exp(-dt * 8); }
-      if (actor.removed) { this.city[body ? 'people' : 'cars'].hide(actor.source.id); if (body) { this.city.heads.hide(actor.source.extra); for (const id of actor.limbs!) this.limbs.hide(id); } continue; }
+      if (actor.removed) { this.city[body ? 'people' : 'cars'].hide(actor.source.id); if (body) { this.city.heads.hide(actor.source.extra); for (const id of actor.limbs!) this.limbs.hide(id); } else this.city.cabins.hide(actor.source.extra); continue; }
       const id = actor.source.id;
       if (body) {
         rotation.set(actor.rx, actor.ry, actor.rz);
@@ -322,26 +329,32 @@ export class Effects {
         }
       } else {
         this.city.cars.set(id, actor.x, actor.y, actor.z, 2.25, 1.1, 4.5, actor.ry, actor.rx, actor.rz, false);
-        if (!actor.submerged && actor.age < 9 && Math.floor(actor.age * 7) !== Math.floor((actor.age - dt) * 7)) { this.smoke.emit(actor.x, actor.y + 2, actor.z, 1, 7, 0, 8, 3, '#363e40'); this.fire.emit(actor.x, actor.y + 1, actor.z, 0, 5, 0, 5, .6, '#ff842c'); }
+        if (actor.lifted) { rotation.set(actor.rx, actor.ry, actor.rz); offset.set(0, .85, 0).applyEuler(rotation); this.city.cabins.set(actor.source.extra, actor.x + offset.x, actor.y + offset.y, actor.z + offset.z, 1.8, .8, 2.2, actor.ry, actor.rx, actor.rz, false); }
+        if (!actor.lifted && !actor.submerged && actor.age < 9 && Math.floor(actor.age * 7) !== Math.floor((actor.age - dt) * 7)) { this.smoke.emit(actor.x, actor.y + 2, actor.z, 1, 7, 0, 8, 3, '#363e40'); this.fire.emit(actor.x, actor.y + 1, actor.z, 0, 5, 0, 5, .6, '#ff842c'); }
       }
     }
   }
   private pullTransport(event: Event, dt: number, scale: number) {
-    const center = new T.Vector3(event.x, 65, event.z), captured = event.data.captured as Set<T.Group>;
+    const tornado = event.type === 'tornado', powerScale = Math.sqrt(event.power);
+    const center = new T.Vector3(event.x, tornado ? 110 * powerScale : 65, event.z), captured = event.data.captured as Set<T.Group>;
+    const radius = (tornado ? 110 : 195) * powerScale * scale;
+    for (const car of this.city.traffic) if (car.alive && Math.hypot(car.x - event.x, car.z - event.z) < radius) this.city.liftCar(car, { x: event.x, z: event.z, radius, strength: 0 });
     for (const object of [...this.city.planes, ...this.city.ships]) {
       if (!object.userData.alive || (object.userData.gravityWell && object.userData.gravityWell !== event)) continue;
       const distance = object.position.distanceTo(center);
       if (!captured.has(object)) {
-        if (distance > 195 * Math.sqrt(event.power) * scale) continue;
+        if (tornado ? (Math.hypot(object.position.x - event.x, object.position.z - event.z) > radius || object.position.y > 240 * powerScale) : distance > radius) continue;
         captured.add(object); object.userData.gravityWell = event;
+        if (this.city.planes.includes(object)) this.aircraftCaptured++; else this.shipsCaptured++;
         object.userData.captureVelocity = object.userData.velocity?.clone() ?? new T.Vector3(); object.userData.captureAge = 0;
       }
       const velocity = object.userData.captureVelocity as T.Vector3, delta = center.clone().sub(object.position);
-      velocity.x += (delta.x * 2.2 + delta.z * .5 - velocity.x * .9) * dt;
-      velocity.z += (delta.z * 2.2 - delta.x * .5 - velocity.z * .9) * dt;
-      velocity.y += (delta.y * 2.2 - velocity.y * .9) * dt;
+      const swirl = tornado ? 3.2 : .5, drag = tornado ? 2.3 : .9;
+      velocity.x += (delta.x * 2.6 + delta.z * swirl - velocity.x * drag) * dt;
+      velocity.z += (delta.z * 2.6 - delta.x * swirl - velocity.z * drag) * dt;
+      velocity.y += (delta.y * 2.2 - velocity.y * 1.2) * dt;
       object.position.addScaledVector(velocity, dt); object.rotation.z += dt * 1.7; object.rotation.x += dt * .4; object.userData.captureAge += dt;
-      if (distance < 45 || object.userData.captureAge > 3) this.shredTransport(object, event);
+      if ((!tornado && distance < 35) || object.userData.captureAge > (tornado ? 3.5 : 4.5)) this.shredTransport(object, event);
     }
   }
   private shredTransport(object: T.Group, event: Event) {
@@ -349,6 +362,35 @@ export class Effects {
     if (object.userData.velocity && object.userData.captureVelocity) object.userData.velocity.copy(object.userData.captureVelocity);
     if (this.city.planes.includes(object)) this.city.destroyPlane(object, hit); else this.city.destroyShip(object, hit, true);
     delete object.userData.gravityWell; delete object.userData.captureVelocity; delete object.userData.captureAge;
+  }
+  private updateUfo(event: Event, time: number) {
+    event.group.rotation.y = event.age * .12;
+    event.group.children.forEach((craft, i) => { craft.position.set(Math.cos(event.age * .28 + i * 2.094) * 75, 142 + Math.sin(time + i) * 8, Math.sin(event.age * .28 + i * 2.094) * 75); });
+    if (event.tick > .55) {
+      event.tick = 0;
+      const candidates: { source: object; position: T.Vector3; priority: number }[] = [];
+      const add = (source: object, x: number, y: number, z: number, priority: number) => { if (Math.hypot(x - event.x, z - event.z) < 120 * Math.sqrt(event.power)) candidates.push({ source, position: new T.Vector3(x, y, z), priority }); };
+      for (const object of [...this.city.planes, ...this.city.ships]) if (object.userData.alive && !object.userData.gravityWell) add(object, object.position.x, object.position.y, object.position.z, this.city.planes.includes(object) ? 0 : 1);
+      for (const car of this.city.traffic) if (car.alive) add(car, car.x, 1 + this.city.groundOffset(car.x, car.z), car.z, 2);
+      for (const tree of this.city.trees) if (tree.alive) add(tree, tree.x, 4 + this.city.groundOffset(tree.x, tree.z), tree.z, 3);
+      for (const building of this.city.buildings) if (building.health > 0) add(building, building.x, 2 + this.city.groundOffset(building.x, building.z), building.z, 4);
+      const used = new Set<object>(); event.data.beamTargets = [];
+      for (const craft of event.group.children) {
+        const world = craft.getWorldPosition(new T.Vector3());
+        const target = candidates.filter(c => !used.has(c.source)).sort((a, b) => a.priority - b.priority || a.position.distanceToSquared(world) - b.position.distanceToSquared(world))[0];
+        if (target) used.add(target.source);
+        const point = target?.position ?? new T.Vector3(world.x, 0, world.z); event.data.beamTargets.push(point);
+        this.city.hit({ x: point.x, z: point.z, radius: 34 * Math.sqrt(event.power), strength: 28 * event.power, fire: true, column: { bottom: Math.min(-25, point.y - 12), top: Math.max(point.y, world.y) + 20 } });
+        for (let i = 0; i < 5; i++) this.fire.emit(point.x, point.y + 2, point.z, (Math.random() - .5) * 10, 15, (Math.random() - .5) * 10, 5, .6, '#a9ffca');
+      }
+    }
+    event.group.children.forEach((craft, i) => {
+      const point = (event.data.beamTargets as T.Vector3[] | undefined)?.[i]; if (!point) return;
+      const local = craft.worldToLocal(point.clone()), beam = craft.children[2] as T.Mesh;
+      beam.position.copy(local).multiplyScalar(.5); beam.scale.set(1.4, local.length() / 135, 1.4);
+      beam.quaternion.setFromUnitVectors(new T.Vector3(0, 1, 0), local.clone().normalize().negate());
+      (beam.material as T.MeshBasicMaterial).opacity = .15 + Math.sin(time * 18) * .04;
+    });
   }
   update(dt: number, time: number) {
     if (dt <= 0) return;
@@ -359,6 +401,11 @@ export class Effects {
       e.age += dt; e.tick += dt; const t = e.age, p = e.power;
       if (e.type === 'meteor' || e.type === 'bomb' || e.type === 'nuke') {
         const f = Math.min(1, t / e.duration), mesh = e.group.children[0]; mesh.position.set(e.type === 'meteor' ? (1 - f) * -230 : 0, 520 * (1 - f * f), e.type === 'meteor' ? (1 - f) * -90 : 0); mesh.rotation.x += dt;
+        const position = new T.Vector3(e.x + mesh.position.x, mesh.position.y, e.z + mesh.position.z);
+        const previous = e.data.projectilePosition ?? new T.Vector3(e.x + (e.type === 'meteor' ? -230 : 0), 520, e.z + (e.type === 'meteor' ? -90 : 0));
+        const path = new T.Line3(previous, position), closest = new T.Vector3();
+        for (const plane of this.city.planes) if (plane.userData.alive && path.closestPointToPoint(plane.position, true, closest).distanceTo(plane.position) < 23 + (e.type === 'meteor' ? 8 * Math.sqrt(p) : 2)) this.city.destroyPlane(plane, { x: position.x, z: position.z, radius: 60, strength: 200, impulse: true });
+        e.data.projectilePosition = position;
         if (e.tick > .025 && e.type === 'meteor') { e.tick = 0; this.fire.emit(e.x + mesh.position.x, mesh.position.y + 8, e.z + mesh.position.z, -20, 30, -10, 32, 1.1, '#ff9e36'); this.smoke.emit(e.x + mesh.position.x, mesh.position.y, e.z + mesh.position.z, -10, 15, -5, 28, 2.4, '#6a5d50'); }
         if (f === 1) {
           const radius = (e.type === 'meteor' ? 105 : e.type === 'nuke' ? 220 : 65) * Math.sqrt(p); this.explosion(e.x, e.z, radius, (e.type === 'nuke' ? 340 : 230) * p);
@@ -382,13 +429,12 @@ export class Effects {
         e.tick = 0; const k = e.data.next++; this.trigger('bomb', e.x + (k % 4 - 1.5) * 42, e.z + (Math.floor(k / 4) - 1) * 44, p * .7, false);
       } else if (e.type === 'tornado') {
         e.x += Math.sin(t * .3) * dt * 18; e.z -= dt * 12; e.group.position.set(e.x, 0, e.z);
+        this.pullTransport(e, dt, 1);
         e.group.children.forEach((ring, i) => { ring.rotation.z = time * (2 + i * .025); ring.position.x = Math.sin(time * 1.8 + i * .12) * i * .28; ring.position.z = Math.cos(time * 1.5 + i * .1) * i * .25; });
-        if (e.tick > .2) { e.tick = 0; this.city.hit({ x: e.x, z: e.z, radius: 78 * Math.sqrt(p), strength: 19 * p }); for (let i = 0; i < 6; i++) { const a = Math.random() * 6.28, h = Math.random() * 140; this.smoke.emit(e.x + Math.cos(a) * (12 + h * .2), h, e.z + Math.sin(a) * (12 + h * .2), -Math.sin(a) * 45, 22, Math.cos(a) * 45, 18, 1.4, '#5a6568'); } }
-        for (const d of [...this.debris, ...this.wrecks, ...this.bodies]) if (d && !d.removed && !d.submerged && Math.hypot(d.x - e.x, d.z - e.z) < 110) { const dx = d.x - e.x, dz = d.z - e.z; d.vx += (-dx * .7 - dz * 1.7 - d.vx * .65) * dt; d.vz += (-dz * .7 + dx * 1.7 - d.vz * .65) * dt; d.vy += (85 - d.y * .34 - d.vy * .8) * dt; d.resting = false; }
+        if (e.tick > .2) { e.tick = 0; this.city.hit({ x: e.x, z: e.z, radius: 110 * Math.sqrt(p), strength: 19 * p, column: { bottom: -25, top: 240 * Math.sqrt(p) } }); for (let i = 0; i < 6; i++) { const a = Math.random() * 6.28, h = Math.random() * 140; this.smoke.emit(e.x + Math.cos(a) * (12 + h * .2), h, e.z + Math.sin(a) * (12 + h * .2), -Math.sin(a) * 45, 22, Math.cos(a) * 45, 18, 1.4, '#5a6568'); } }
+        for (const d of [...this.debris, ...this.wrecks, ...this.bodies]) if (d && !d.removed && !d.submerged && Math.hypot(d.x - e.x, d.z - e.z) < 140 * Math.sqrt(p)) { const dx = d.x - e.x, dz = d.z - e.z; d.vx += (-dx * .7 - dz * 1.7 - d.vx * .65) * dt; d.vz += (-dz * .7 + dx * 1.7 - d.vz * .65) * dt; d.vy += (85 - d.y * .34 - d.vy * .8) * dt; d.resting = false; }
       } else if (e.type === 'ufo') {
-        e.group.rotation.y = t * .12;
-        e.group.children.forEach((ship, i) => { ship.position.x = Math.cos(t * .28 + i * 2.094) * 75; ship.position.z = Math.sin(t * .28 + i * 2.094) * 75; ship.position.y = 142 + Math.sin(time + i) * 8; });
-        if (e.tick > .55) { e.tick = 0; for (const ship of e.group.children) { const world = ship.getWorldPosition(new T.Vector3()); this.city.hit({ x: world.x, z: world.z, radius: 34 * Math.sqrt(p), strength: 28 * p, fire: true }); for (let k = 0; k < 4; k++) this.fire.emit(world.x, 5, world.z, (Math.random() - .5) * 8, 50, (Math.random() - .5) * 8, 7, 2.2, '#a9ffca'); } }
+        this.updateUfo(e, time);
       } else if (e.type === 'tsunami') {
         const plan = e.data.plan as WavePlan; (e.group.children[0] as TsunamiWave).update(t, this.city.night.value);
         const surface = (x: number, z: number) => SEA_LEVEL + waveHeight(plan, t, x, z);
@@ -407,7 +453,7 @@ export class Effects {
         }
       } else if (e.type === 'quake') {
         this.shake = Math.max(this.shake, 1.8 * p * (1 - t / e.duration)); e.group.scale.setScalar(Math.min(1, t));
-        if (e.tick > .55) { e.tick = 0; this.city.hit({ x: e.x + Math.sin(t) * 55, z: e.z + Math.cos(t) * 55, radius: 220 * Math.sqrt(p), strength: 15 * p }); if (Math.random() > .65) this.sound.impact(.5); }
+        if (e.tick > .55) { e.tick = 0; this.city.hit({ x: e.x + Math.sin(t) * 55, z: e.z + Math.cos(t) * 55, radius: 220 * Math.sqrt(p), strength: 15 * p, groundOnly: true }); if (Math.random() > .65) this.sound.impact(.5); }
       } else if (e.type === 'storm') {
         if (e.tick > .7) { e.tick = 0; this.bolt(e.x + (Math.random() - .5) * 250, e.z + (Math.random() - .5) * 250, p); }
         for (let i = 0; i < 12; i++) this.fire.emit(e.x + (Math.random() - .5) * 350, 190, e.z + (Math.random() - .5) * 350, -12, -150, 0, 1.8, 1.5, '#6c9ca9');
@@ -420,8 +466,8 @@ export class Effects {
       } else if (e.type === 'blackhole') {
         const scale = Math.max(0, Math.min(1, t / 2, (e.duration - t) / 2)); e.group.scale.setScalar(scale);
         e.group.children.forEach((c, i) => { if (i) c.rotation.z = t * (.3 + i * .25); });
-        if (e.tick > .35) { e.tick = 0; this.city.hit({ x: e.x, z: e.z, radius: 175 * Math.sqrt(p) * scale, strength: 19 * p }); }
         this.pullTransport(e, dt, scale);
+        if (e.tick > .35) { e.tick = 0; this.city.hit({ x: e.x, z: e.z, radius: 175 * Math.sqrt(p) * scale, strength: 19 * p }); }
         for (const d of [...this.debris, ...this.wrecks, ...this.bodies]) if (!d.removed && Math.hypot(d.x - e.x, d.z - e.z) < 240 * Math.sqrt(p) * scale) {
           const dx = e.x - d.x, dz = e.z - d.z;
           d.resting = false; d.vx += (dx * 2.3 + dz * .65 - d.vx * .7) * dt; d.vy += ((65 - d.y) * 2.6 + 30 - d.vy * .55) * dt; d.vz += (dz * 2.3 - dx * .65 - d.vz * .7) * dt;
@@ -445,7 +491,7 @@ export class Effects {
     this.rippleBatch.mesh.geometry.attributes.aOpacity.needsUpdate = true; this.sprayWater.update(dt);
     this.updateActors(dt); this.fire.update(dt); this.smoke.update(dt); this.blood.update(dt);
   }
-  removeEvent(e: Event) { this.waterWaves.delete(e); if (e.type === 'blackhole') for (const object of e.data.captured as Set<T.Group>) if (object.userData.gravityWell === e) this.shredTransport(object, e); this.scene.remove(e.group); e.group.traverse(o => { if (o instanceof T.Mesh) { o.geometry.dispose(); for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.dispose(); } }); const i = this.events.indexOf(e); if (i >= 0) this.events.splice(i, 1); }
+  removeEvent(e: Event) { this.waterWaves.delete(e); if (e.type === 'blackhole' || e.type === 'tornado') for (const object of e.data.captured as Set<T.Group>) if (object.userData.gravityWell === e) this.shredTransport(object, e); this.scene.remove(e.group); e.group.traverse(o => { if (o instanceof T.Mesh) { o.geometry.dispose(); for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.dispose(); } }); const i = this.events.indexOf(e); if (i >= 0) this.events.splice(i, 1); }
   setBloodEnabled(enabled: boolean) { this.bloodEnabled = enabled; this.blood.mesh.visible = enabled; this.splats.mesh.visible = enabled; }
-  reset() { for (const e of [...this.events]) this.removeEvent(e); this.city.basins = []; this.city.refreshGround(); this.shipsDestroyed = this.docksDestroyed = this.floodClock = 0; this.fire.clear(); this.smoke.clear(); this.sprayWater.clear(); this.ripples = []; this.rippleCursor = this.rippleBatch.used = this.rippleBatch.mesh.count = 0; this.waterImpacts = this.solidImpacts = this.buildingImpacts = this.aircraftDestroyed = 0; this.blood.clear(); this.debris = []; this.debrisCursor = 0; this.debrisBatch.used = 0; this.debrisBatch.mesh.count = 0; this.wrecks = []; this.bodies = []; this.secondaryBlasts = []; this.splats.used = this.splats.mesh.count = this.splatCursor = 0; this.limbs.used = this.limbs.mesh.count = 0; this.carExplosions = this.deaths = this.waveCounter = 0; this.carSoundCooldown = 0; this.executed = 0; this.flood = 0; this.flash = 0; this.shake = 0; }
+  reset() { for (const e of [...this.events]) this.removeEvent(e); this.city.basins = []; this.city.refreshGround(); this.shipsDestroyed = this.docksDestroyed = this.floodClock = this.carsLifted = this.aircraftCaptured = this.shipsCaptured = 0; this.fire.clear(); this.smoke.clear(); this.sprayWater.clear(); this.ripples = []; this.rippleCursor = this.rippleBatch.used = this.rippleBatch.mesh.count = 0; this.waterImpacts = this.solidImpacts = this.buildingImpacts = this.aircraftDestroyed = 0; this.blood.clear(); this.debris = []; this.debrisCursor = 0; this.debrisBatch.used = 0; this.debrisBatch.mesh.count = 0; this.wrecks = []; this.bodies = []; this.secondaryBlasts = []; this.splats.used = this.splats.mesh.count = this.splatCursor = 0; this.limbs.used = this.limbs.mesh.count = 0; this.carExplosions = this.deaths = this.waveCounter = 0; this.carSoundCooldown = 0; this.executed = 0; this.flood = 0; this.flash = 0; this.shake = 0; }
 }
