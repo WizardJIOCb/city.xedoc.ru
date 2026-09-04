@@ -1,0 +1,35 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { Scene } from 'three';
+import { City } from '../src/world.ts';
+import { Effects } from '../src/effects.ts';
+import { Sound } from '../src/audio.ts';
+
+test('mega blast keeps an expanding fire volume after sparks expire, pauses and disposes it', () => {
+  const scene = new Scene(), city = new City(scene, 'FIREBALL', 14), fx = new Effects(scene, city, new Sound());
+  fx.trigger('nuke', 0, 0);
+  fx.update(1.5, 1.5);
+  const event = fx.events.find(e => e.type === 'fireball');
+  assert.ok(event, 'impact needs a dedicated fire volume, not just small sparks');
+  const mesh = event.group.children[0], initialSize = mesh.scale.x;
+  fx.update(.5, 2);
+  assert.ok(mesh.scale.x > initialSize * 5);
+  assert.ok(mesh.material.uniforms.uOpacity.value > .9);
+  const age = mesh.material.uniforms.uAge.value, height = mesh.position.y;
+  fx.update(0, 2);
+  assert.equal(mesh.material.uniforms.uAge.value, age);
+  assert.equal(mesh.position.y, height);
+  fx.update(3, 5);
+  assert.ok(fx.events.includes(event), 'the volume must last beyond the initial spark burst');
+  assert.ok(mesh.material.uniforms.uOpacity.value > .9);
+  fx.update(3, 8);
+  assert.ok(mesh.material.uniforms.uOpacity.value < .9, 'smoke must fade before removal');
+  let geometryDisposed = false, materialDisposed = false;
+  mesh.geometry.addEventListener('dispose', () => geometryDisposed = true);
+  mesh.material.addEventListener('dispose', () => materialDisposed = true);
+  fx.update(2, 10);
+  assert.ok(!fx.events.includes(event));
+  assert.ok(!scene.children.includes(event.group));
+  assert.ok(geometryDisposed && materialDisposed);
+  fx.reset(); city.dispose();
+});

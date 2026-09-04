@@ -2,6 +2,7 @@ import * as T from 'three';
 import { Batch, City, type Building, type Citizen, type Hit } from './world';
 import { blastImpulse } from './model.js';
 import { Sound } from './audio';
+import { MegaFireball, MEGA_FIREBALL_DURATION } from './mega-fireball';
 import { advanceBody, type Motion, type Impact } from './physics';
 
 export const DISASTERS = [
@@ -49,7 +50,7 @@ class Particles {
 }
 type Debris = Motion & { id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; rz: number; spin: number; sx: number; sy: number; sz: number; life: number; waveId?: number; };
 type ThrownActor = Motion & { source: Citizen; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; ry: number; rz: number; spin: number; age: number; landed: boolean; limbs?: number[]; waveId?: number; };
-type Event = { type: DisasterId | 'bolt' | 'ring' | 'plume'; x: number; z: number; age: number; duration: number; power: number; group: T.Group; tick: number; data: Record<string, any>; };
+type Event = { type: DisasterId | 'bolt' | 'ring' | 'plume' | 'fireball'; x: number; z: number; age: number; duration: number; power: number; group: T.Group; tick: number; data: Record<string, any>; };
 export class Effects {
   fire: Particles; smoke: Particles; debrisBatch: Batch; debris: Debris[] = []; debrisCursor = 0; events: Event[] = [];
   blood: Particles; splats: Batch; limbs: Batch; splatCursor = 0; bloodEnabled = true;
@@ -177,7 +178,7 @@ export class Effects {
     const e: Event = { type, x, z, duration, power, group, age: 0, tick: 0, data: {} }; this.events.push(e); return e;
   }
   trigger(type: DisasterId, x: number, z: number, multiplier = this.power, announce = true) {
-    if (this.events.filter(e => e.type !== 'ring' && e.type !== 'bolt' && e.type !== 'plume').length >= 28) { this.onEvent('Слишком много событий', 'Дождитесь завершения части катастроф'); return false; }
+    if (this.events.filter(e => !['ring', 'bolt', 'plume', 'fireball'].includes(e.type)).length >= 28) { this.onEvent('Слишком много событий', 'Дождитесь завершения части катастроф'); return false; }
     const d = DISASTERS.find(d => d.id === type)!; if (announce) { this.executed++; this.onEvent(d.name, d.sub); }
     const p = multiplier;
     if (type.startsWith('squad_')) return this.onDeploy(type.slice(6), x, z);
@@ -295,8 +296,14 @@ export class Effects {
         if (e.tick > .025 && e.type === 'meteor') { e.tick = 0; this.fire.emit(e.x + mesh.position.x, mesh.position.y + 8, e.z + mesh.position.z, -20, 30, -10, 32, 1.1, '#ff9e36'); this.smoke.emit(e.x + mesh.position.x, mesh.position.y, e.z + mesh.position.z, -10, 15, -5, 28, 2.4, '#6a5d50'); }
         if (f === 1) {
           const radius = (e.type === 'meteor' ? 105 : e.type === 'nuke' ? 220 : 65) * Math.sqrt(p); this.explosion(e.x, e.z, radius, (e.type === 'nuke' ? 340 : 230) * p);
-
+          if (e.type === 'nuke') {
+            const volumes = this.events.filter(event => event.type === 'fireball');
+            if (volumes.length >= 6) this.removeEvent(volumes[0]);
+            this.event('fireball', e.x, e.z, MEGA_FIREBALL_DURATION, p).group.add(new MegaFireball(radius));
+          }
         }
+      } else if (e.type === 'fireball') {
+        (e.group.children[0] as MegaFireball).update(t);
       } else if (e.type === 'plume') {
         if (e.tick > .065) { e.tick = 0; const radius = e.data.radius, age = e.age, top = Math.min(radius * .8, age * 34), spread = Math.min(radius * .38, age * 12);
           for (let i = 0; i < 6; i++) { const a = Math.random() * Math.PI * 2, cap = i > 2, r = cap ? Math.random() * spread : 3 + Math.random() * 8, y = cap ? top + (Math.random() - .5) * spread * .35 : Math.random() * top;
