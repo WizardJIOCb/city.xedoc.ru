@@ -2,6 +2,8 @@ import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { el } from './ui';
 import type { RealMap, MapResponse } from './real-geometry';
+import { normalizePlace, type SharedPlace } from './place-link';
+import { sharePlace } from './place-share';
 
 type Place = { lat: number; lon: number; name: string; detail: string };
 export class RealPlacePicker {
@@ -29,10 +31,21 @@ export class RealPlacePicker {
       this.choose({ lat, lon, name: 'Выбранные координаты', detail: '' });
     };
     el('real-build').onclick = () => void this.build();
-    el<HTMLDialogElement>('real-map-dialog').addEventListener('close', () => { this.controller?.abort(); this.searchController?.abort(); this.worker?.terminate(); this.worker = undefined; this.setBusy(false); });
+    el('real-share').onclick = () => {
+      try { sharePlace({ ...this.place, size: Number(el<HTMLSelectElement>('real-map-size').value) }); }
+      catch { this.message('Выберите участок между 80° южной и 80° северной широты.', true); }
+    };
+    el<HTMLDialogElement>('real-map-dialog').addEventListener('close', () => { if (!el<HTMLDialogElement>('real-map-dialog').open) this.cancel(); });
     this.choose(this.place); this.setBusy(false);
   }
-  open() { el<HTMLDialogElement>('real-map-dialog').showModal(); requestAnimationFrame(() => { this.map.invalidateSize(); this.updateArea(); }); }
+  cancel() {
+    this.controller?.abort(); this.controller = undefined; this.searchController?.abort(); this.worker?.terminate(); this.worker = undefined; this.setBusy(false);
+  }
+  open(selection?: SharedPlace) {
+    if (selection) { const p = normalizePlace(selection); el<HTMLSelectElement>('real-map-size').value = String(p.size); this.choose({ ...p, detail: '' }); }
+    if (!this.busy) this.message('Оранжевая рамка — граница игрового участка. Нажмите на карту, чтобы передвинуть её.');
+    el<HTMLDialogElement>('real-map-dialog').showModal(); requestAnimationFrame(() => { this.map.invalidateSize(); this.updateArea(); });
+  }
   private message(text: string, error = false) { const status = el('real-map-message'); status.textContent = text; status.classList.toggle('error', error); }
   private choose(place: Place, pan = true) {
     this.place = place; el<HTMLInputElement>('real-lat').value = place.lat.toFixed(5); el<HTMLInputElement>('real-lon').value = place.lon.toFixed(5);
@@ -60,10 +73,10 @@ export class RealPlacePicker {
   private setBusy(value: boolean) {
     this.busy = value;
     if (value) el('real-search-results').replaceChildren();
-    for (const id of ['real-build', 'real-map-size', 'real-search', 'real-lat', 'real-lon', 'real-search-button', 'real-coordinate-button']) (el(id) as HTMLButtonElement).disabled = value;
+    for (const id of ['real-build', 'real-share', 'real-map-size', 'real-search', 'real-lat', 'real-lon', 'real-search-button', 'real-coordinate-button']) (el(id) as HTMLButtonElement).disabled = value;
     el('real-build').textContent = value ? 'Загружаем и строим…' : 'Построить в игре';
   }
-  private async build() {
+  async build() {
     if (this.busy) return; this.setBusy(true); this.searchController?.abort();
     const controller = this.controller = new AbortController(), place = { ...this.place };
     this.message('Загружаем здания, улицы и водоёмы. Это может занять до 35 секунд…');

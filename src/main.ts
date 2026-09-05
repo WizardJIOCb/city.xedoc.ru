@@ -16,6 +16,8 @@ import { DISASTERS, Effects, type DisasterId } from './effects';
 import { Sound } from './audio';
 import { SelfDestruct } from './self-destruct';
 import type { RealMap } from './real-geometry';
+import { createPlaceLink, parsePlaceLink, type SharedPlace } from './place-link';
+import { sharePlace } from './place-share';
 import { buildUI, el, icon, selectCard } from './ui';
 import './style.css';
 import '@fontsource/manrope/400.css';
@@ -116,11 +118,26 @@ for (const b of document.querySelectorAll<HTMLElement>('[data-speed]')) b.onclic
 el('sound').onclick = () => { sound.unlock(); sound.enabled = !sound.enabled; el('sound').innerHTML = icon(sound.enabled ? 'volume' : 'mute'); el('sound').setAttribute('aria-label', sound.enabled ? 'Выключить звук' : 'Включить звук'); saveSettings(); };
 el('help').onclick = () => el<HTMLDialogElement>('help-dialog').showModal(); el('maps').onclick = () => { pendingPreset = preset; el<HTMLDialogElement>('map-dialog').showModal(); }; el('settings').onclick = () => el<HTMLDialogElement>('settings-dialog').showModal();
 let realPicker: import('./real-place-picker').RealPlacePicker | undefined;
-el('real-maps').onclick = async () => {
+let placeOpenRequest = 0;
+async function openRealPlace(selection?: SharedPlace) {
+  const request = ++placeOpenRequest;
+  if (selection) { realPicker?.cancel(); for (const dialog of document.querySelectorAll<HTMLDialogElement>('dialog[open]')) dialog.close(); }
   el<HTMLDialogElement>('map-dialog').close(); el<HTMLDialogElement>('real-map-dialog').showModal();
-  try { const { RealPlacePicker } = await import('./real-place-picker'); if (!el<HTMLDialogElement>('real-map-dialog').open) return; realPicker ??= new RealPlacePicker(map => regenerate(`OSM:${map.lat},${map.lon}:${map.size}`, Math.ceil(map.size / 62), 'real', map)); realPicker.open(); }
+  try {
+    const { RealPlacePicker } = await import('./real-place-picker'); if (request !== placeOpenRequest || !el<HTMLDialogElement>('real-map-dialog').open) return;
+    realPicker ??= new RealPlacePicker(map => regenerate(`OSM:${map.lat},${map.lon}:${map.size}`, Math.ceil(map.size / 62), 'real', map));
+    realPicker.open(selection); if (selection) await realPicker.build();
+  }
   catch { el('real-map-message').textContent = 'Не удалось открыть карту. Обновите страницу и попробуйте ещё раз.'; }
-};
+}
+el('real-maps').onclick = () => void openRealPlace();
+el('share-city').onclick = () => { if (city.realMap) sharePlace(city.realMap); };
+function loadPlaceLink() {
+  const linked = parsePlaceLink(location.hash);
+  if (linked.kind === 'place') void openRealPlace(linked.place);
+  else if (linked.kind === 'invalid') toast('Ссылка на карту повреждена', 'Выберите участок через «Сменить город».', 'map');
+}
+window.addEventListener('hashchange', loadPlaceLink);
 el('fullscreen').onclick = async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); } catch { toast('Полный экран недоступен', 'Разверните окно браузера вручную', 'expand'); } };
 el('camera-home').onclick = () => homeCamera();
 function updateSelfDestructHUD() {
@@ -162,6 +179,11 @@ async function regenerate(seed: string, size: number, style: string, realMap?: R
     selfDestruct.cancel(); effects.reset(); city.dispose(); city = nextCity; effects.attachCity(city); squads.reset(city); selfDestruct.reset(city); simTime = 0; preset = style; homeCamera(); setDay(style === 'night' ? 2 : 0); pause(false); updateHUD(); drawMinimap();
     el('city-name').textContent = style === 'islands' ? 'Архипелаг' : style === 'night' ? 'Неон-Сити' : seed === 'NEW-HAVEN' ? 'Нью-Хейвен' : 'Новый горизонт'; el('seed-label').textContent = 'SEED: ' + seed; toast('Город готов', `${city.buildings.length.toLocaleString('ru')} зданий. Чистый лист.`, 'city');
     mountainGroup.visible = !realMap; document.body.classList.toggle('real-map-mode', !!realMap); el('map-credit').hidden = !realMap;
+    el('share-city').hidden = !realMap;
+    const pageUrl = new URL(location.href);
+    if (realMap) pageUrl.hash = new URL(createPlaceLink(realMap)).hash;
+    else if (parsePlaceLink(pageUrl.hash).kind !== 'none') pageUrl.hash = '';
+    history.replaceState(null, '', pageUrl);
     if (realMap) { el('city-name').textContent = realMap.name; el('seed-label').textContent = `${realMap.lat.toFixed(4)}, ${realMap.lon.toFixed(4)}`; regionMap = false; el('minimap-region').textContent = 'Регион'; toast('Реальное место готово', `${city.buildings.length} зданий · ${realMap.estimatedHeights} высот восстановлено процедурно`, 'map'); }
     return true;
   } catch (e) { toast('Не удалось построить город', String(e), 'map'); return false; } finally { generating = false; el('loading').style.opacity = '0'; setTimeout(() => el('loading').style.display = 'none', 500); }
@@ -239,4 +261,4 @@ function frame(now: number) {
   if (hudClock > .3) { updateHUD(); hudClock = 0; } if (mapClock > .5) { drawMinimap(); mapClock = 0; }
 }
 updateHUD(); drawMinimap(); requestAnimationFrame(frame);
-setTimeout(() => { el('loading').style.opacity = '0'; setTimeout(() => el('loading').style.display = 'none', 650); }, 900);
+setTimeout(() => { el('loading').style.opacity = '0'; setTimeout(() => el('loading').style.display = 'none', 650); loadPlaceLink(); }, 900);
