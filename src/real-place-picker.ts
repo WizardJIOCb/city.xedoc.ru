@@ -30,7 +30,7 @@ export class RealPlacePicker {
     };
     el('real-build').onclick = () => void this.build();
     el<HTMLDialogElement>('real-map-dialog').addEventListener('close', () => { this.controller?.abort(); this.searchController?.abort(); this.worker?.terminate(); this.worker = undefined; this.setBusy(false); });
-    this.choose(this.place);
+    this.choose(this.place); this.setBusy(false);
   }
   open() { el<HTMLDialogElement>('real-map-dialog').showModal(); requestAnimationFrame(() => { this.map.invalidateSize(); this.updateArea(); }); }
   private message(text: string, error = false) { const status = el('real-map-message'); status.textContent = text; status.classList.toggle('error', error); }
