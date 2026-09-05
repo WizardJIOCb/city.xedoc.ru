@@ -11,6 +11,7 @@
 .mini-switch{border:1px solid #91aaa238;border-radius:4px;background:#243c42;color:#b3c5bc;font:600 9px Manrope,sans-serif;padding:4px 6px;cursor:pointer;margin-left:auto;margin-right:8px}
 
 #world.dragging{cursor:grabbing}
+#fps-counter{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:46px;padding:4px 7px;margin-right:6px;border:1px solid var(--line);border-radius:7px;background:#172830b8;font-variant-numeric:tabular-nums;line-height:1.2;pointer-events:none}#fps-counter b{font-size:15px;font-weight:700}#fps-counter small{font-size:7px;letter-spacing:1px;color:#a9bdbf}#fps-counter[hidden]{display:none}@media(max-width:760px){#fps-counter{min-width:34px;margin-right:3px;padding:3px}#fps-counter b{font-size:12px}}
 
 .touch-controls{display:none}@media(pointer:coarse){footer .desktop-controls,footer .engine-status{display:none}footer .touch-controls{display:block;font-size:8px;line-height:1.4}#world{-webkit-touch-callout:none;user-select:none;-webkit-user-select:none}body{overscroll-behavior:none}}
 
@@ -61,3 +62,4 @@
 @media(max-height:600px){#real-map-picker{height:230px}#real-map-dialog{max-height:94vh}}
 .real-map-actions{display:flex;gap:9px;align-items:stretch}.real-map-actions .primary-button{flex:1;width:auto;margin:0}.secondary-button{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px 15px;border:1px solid #e0b88b70;border-radius:6px;color:#f3c8a0;font-size:11px;font-weight:700}.secondary-button .icon{width:17px}#share-city{display:flex;width:fit-content;margin-top:6px;color:#e8b68e}#share-city[hidden]{display:none}#place-share-url{display:block;width:100%;min-width:0;padding:12px;border-radius:6px;border:1px solid var(--line);background:#10212b;color:#e9d2af;font:12px/1.6 Manrope,Arial,sans-serif}#place-share-description{overflow-wrap:anywhere}#place-share-status{font-size:11px;line-height:1.6;min-height:36px;color:#c2d9cd}#place-share-dialog .primary-button{margin-top:12px}@media(max-width:760px){.real-map-actions{flex-direction:column}.real-map-actions button{width:100%}.secondary-button{min-height:40px}#share-city{font-size:9px;margin-top:4px}}
 #place-share-copy{justify-content:center;gap:10px}
+@media(max-width:430px){#fps-counter{position:fixed;top:72px;right:15px;flex-direction:row;gap:5px;min-width:52px;padding:4px 7px;margin:0}}

@@ -1,9 +1,10 @@
+import { REAL_MAP_SIZES } from '../server/map-limits.mjs';
 export type SharedPlace = { lat: number; lon: number; size: number; name: string };
 export type PlaceLink = { kind: 'none' } | { kind: 'invalid' } | { kind: 'place'; place: SharedPlace };
 const KEYS = ['map', 'v', 'lat', 'lon', 'size', 'name'];
 
 export function normalizePlace(place: SharedPlace): SharedPlace {
-  if (!Number.isFinite(place.lat) || !Number.isFinite(place.lon) || Math.abs(place.lat) > 80 || Math.abs(place.lon) > 179.9 || ![600, 1200, 1800].includes(place.size)) throw new Error('Некорректные параметры участка.');
+  if (!Number.isFinite(place.lat) || !Number.isFinite(place.lon) || Math.abs(place.lat) > 80 || Math.abs(place.lon) > 179.9 || !REAL_MAP_SIZES.includes(place.size)) throw new Error('Некорректные параметры участка.');
   const name = Array.from(place.name.replace(/[\u0000-\u001f\u007f]/g, '').trim()).slice(0, 120).join('') || 'Выбранное место';
   return { lat: Number(place.lat.toFixed(5)), lon: Number(place.lon.toFixed(5)), size: place.size, name };
 }

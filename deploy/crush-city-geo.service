@@ -8,7 +8,7 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/var/www/city.xedoc.ru
-ExecStart=/usr/bin/node /var/www/city.xedoc.ru/current/.server/geo-server.mjs
+ExecStart=/usr/bin/node --max-old-space-size=512 /var/www/city.xedoc.ru/current/.server/geo-server.mjs
 Environment=PORT=5190
 Environment=GEO_CACHE_DIR=/var/cache/crush-city-geo
 EnvironmentFile=-/etc/default/crush-city-geo
@@ -19,7 +19,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-MemoryMax=384M
+MemoryHigh=768M
+MemoryMax=1G
 
 [Install]
 WantedBy=multi-user.target

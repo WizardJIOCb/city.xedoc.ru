@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { REAL_MAP_SIZES } from '../server/map-limits.mjs';
 import { createPlaceLink, parsePlaceLink, normalizePlace } from '../src/place-link.ts';
 
 test('place links round-trip the selected coordinates, every area size, and Russian names', () => {
-  for (const size of [600, 1200, 1800]) {
+  for (const size of REAL_MAP_SIZES) {
     const place = { lat:54.7261409, lon:55.947499, size, name:'Уфа · центр / парк + река & двор' };
     const url = new URL(createPlaceLink(place));
     assert.equal(url.origin,'https://city.xedoc.ru'); assert.equal(url.search,'');
@@ -18,7 +19,7 @@ test('southern and western coordinates, equator and supported map boundaries rem
 });
 test('unrelated fragments do not start an import; broken and ambiguous map links are rejected', () => {
   for(const hash of ['', '#', '#help'])assert.equal(parsePlaceLink(hash).kind,'none');
-  for(const hash of ['#map=real','#map=other&v=1&lat=0&lon=0&size=600','#map=real&v=2&lat=0&lon=0&size=600','#map=real&v=1&lat=&lon=0&size=600','#map=real&v=1&lat=1&lat=2&lon=0&size=600','#map=real&v=1&lat=NaN&lon=0&size=600','#map=real&v=1&lat=Infinity&lon=0&size=600','#map=real&v=1&lat=81&lon=0&size=600','#map=real&v=1&lat=0&lon=180&size=600','#map=real&v=1&lat=0&lon=0&size=10000','#map=real&v=1&lat=0&lon=0&size=600&name='+ 'x'.repeat(2100)])assert.equal(parsePlaceLink(hash).kind,'invalid',hash);
+  for(const hash of ['#map=real','#map=other&v=1&lat=0&lon=0&size=600','#map=real&v=2&lat=0&lon=0&size=600','#map=real&v=1&lat=&lon=0&size=600','#map=real&v=1&lat=1&lat=2&lon=0&size=600','#map=real&v=1&lat=NaN&lon=0&size=600','#map=real&v=1&lat=Infinity&lon=0&size=600','#map=real&v=1&lat=81&lon=0&size=600','#map=real&v=1&lat=0&lon=180&size=600','#map=real&v=1&lat=0&lon=0&size=30000','#map=real&v=1&lat=0&lon=0&size=600&name='+ 'x'.repeat(2100)])assert.equal(parsePlaceLink(hash).kind,'invalid',hash);
 });
 test('names cannot inject extra URL parameters or replace the trusted destination', () => {
   const name='<img src=x onerror=alert(1)> &size=10000 #map=other https://example.com';

@@ -61,17 +61,29 @@ export class CollisionWorld {
       }
     }
     for (const b of this.source) for (let x = Math.floor((b.x - b.width / 2 - 5) / 64); x <= Math.floor((b.x + b.width / 2 + 5) / 64); x++) {
-      for (let z = Math.floor((b.z - b.depth / 2 - 5) / 64); z <= Math.floor((b.z + b.depth / 2 + 5) / 64); z++) {
+      const depth = Math.max(b.depth / 2, b.width * .45);
+      for (let z = Math.floor((b.z - depth - 5) / 64); z <= Math.floor((b.z + depth + 5) / 64); z++) {
         const key = `${x},${z}`, list = this.cells.get(key) ?? []; list.push(b); this.cells.set(key, list);
       }
     }
   }
+  nearby(x: number, z: number, radius: number): Building[] {
+    if (this.source !== this.city.buildings) this.rebuild();
+    if (radius > this.city.extent * .8) return this.source;
+    const result = new Set<Building>();
+    for (let ix = Math.floor((x - radius) / 64); ix <= Math.floor((x + radius) / 64); ix++) for (let iz = Math.floor((z - radius) / 64); iz <= Math.floor((z + radius) / 64); iz++) for (const b of this.cells.get(`${ix},${iz}`) ?? []) result.add(b);
+    return [...result];
+  }
   sweep(from: Vec, to: Vec, radius = .5): Contact | null {
     if (this.source !== this.city.buildings) this.rebuild();
     const candidates = new Set<Building>(), triangles = new Map<Building, Set<Point[]>>(); let nearest: Contact | null = null;
-    for (let x = Math.floor((Math.min(from.x, to.x) - radius) / 64); x <= Math.floor((Math.max(from.x, to.x) + radius) / 64); x++) {
-      for (let z = Math.floor((Math.min(from.z, to.z) - radius) / 64); z <= Math.floor((Math.max(from.z, to.z) + radius) / 64); z++) {
-        const key = `${x},${z}`; for (const b of this.cells.get(key) ?? []) candidates.add(b);
+    const steps = Math.max(1, Math.ceil(Math.max(Math.abs(to.x - from.x), Math.abs(to.z - from.z)) / 64)), visited = new Set<string>();
+    for (let step = 0; step < steps; step++) {
+      const ax = from.x + (to.x - from.x) * step / steps, az = from.z + (to.z - from.z) * step / steps;
+      const bx = from.x + (to.x - from.x) * (step + 1) / steps, bz = from.z + (to.z - from.z) * (step + 1) / steps;
+      for (let x = Math.floor((Math.min(ax, bx) - radius) / 64); x <= Math.floor((Math.max(ax, bx) + radius) / 64); x++) for (let z = Math.floor((Math.min(az, bz) - radius) / 64); z <= Math.floor((Math.max(az, bz) + radius) / 64); z++) {
+        const key = `${x},${z}`; if (visited.has(key)) continue; visited.add(key);
+        for (const b of this.cells.get(key) ?? []) candidates.add(b);
         for (const entry of this.triangleCells.get(key) ?? []) { const local = triangles.get(entry.building) ?? new Set<Point[]>(); local.add(entry.triangle); triangles.set(entry.building, local); }
       }
     }
@@ -81,6 +93,8 @@ export class CollisionWorld {
       const offset = this.city.groundOffset(b.x, b.z);
       let hit = sweepBox(from, to, { x: b.x - b.width / 2 - radius, y: .6 + offset - radius, z: b.z - b.depth / 2 - radius }, { x: b.x + b.width / 2 + radius, y: height + offset + radius, z: b.z + b.depth / 2 + radius });
       if (b.triangles) {
+        const insideBox = from.x >= b.x - b.width / 2 - radius && from.x <= b.x + b.width / 2 + radius && from.z >= b.z - b.depth / 2 - radius && from.z <= b.z + b.depth / 2 + radius;
+        if (!hit && !insideBox) continue;
         // The bounding box is only a broad phase: courtyards must stay open.
         hit = null;
         for (const triangle of triangles.get(b) ?? []) { const contact = sweepPrism(from, to, triangle, .6 + offset, height + offset, radius); if (contact && (!hit || contact.t < hit.t)) hit = contact; }

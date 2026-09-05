@@ -8,6 +8,7 @@ import { City } from '../src/world.ts';
 import { Effects } from '../src/effects.ts';
 import { Sound } from '../src/audio.ts';
 import { SelfDestruct } from '../src/self-destruct.ts';
+import { footprintGeometry } from '../src/real-world.ts';
 
 function fixture() {
   const lat=55,lon=37,geo=([x,z])=>({lon:lon+x/(111320*Math.cos(lat*Math.PI/180)),lat:lat-z/111320});
@@ -24,6 +25,31 @@ function fixture() {
   ]}};
 }
 function setup() { const map=convertRealMap(fixture(),'Тестовый район'),scene=new T.Scene(),city=new City(scene,'REAL-TEST',10,'real',map),fx=new Effects(scene,city,new Sound()); return {map,scene,city,fx,dispose:()=>{fx.reset();city.dispose()}}; }
+
+test('compact regional OSM retains complete building shapes and relation courtyards',()=>{
+ const data=fixture(), original=convertRealMap(data,'Original');
+ data.osm.elements=data.osm.elements.map(e=>e.type!=='way'?e:{type:'cc_way',id:e.id,tags:e.tags,geometry:{type:'LineString',coordinates:e.geometry.map(p=>[p.lon,p.lat])}});
+ const compact=convertRealMap(data,'Compact');
+ const edges=map=>map.buildings.map(b=>({id:b.id,rings:b.rings.map(r=>r.slice(1).map((p,i)=>[JSON.stringify(r[i]),JSON.stringify(p)].sort().join('|')).sort())})).sort((a,b)=>a.id.localeCompare(b.id));
+ assert.deepEqual(edges(compact),edges(original));
+ assert.equal(compact.buildings.length,2);assert.equal(compact.buildings.find(b=>b.id==='relation/2').rings.length,2);
+ assert.ok(compact.roads.length);assert.ok(compact.water.length);
+});
+test('20 km terrain includes corner buildings, keeps water local and has bounded mesh detail',()=>{
+ const data=fixture();data.size=20000;
+ const geo=([x,z])=>[data.lon+x/(111320*Math.cos(data.lat*Math.PI/180)),data.lat-z/111320];
+ data.osm.elements.push({type:'cc_way',id:900,tags:{building:'yes',height:'30'},geometry:{type:'LineString',coordinates:[[9860,9860],[9900,9860],[9900,9900],[9860,9900],[9860,9860]].map(geo)}});
+ const map=convertRealMap(data,'Region'),scene=new T.Scene(),city=new City(scene,'REGION',323,'real',map),corner=city.buildings.find(b=>b.x>9800);
+ assert.ok(corner);assert.ok(Math.hypot(corner.x,corner.z)<city.worldRadius);assert.equal(city.baseTerrainHeight(9500,9500),.7);assert.equal(city.baseTerrainHeight(10001,0),null);
+ const before=city.destroyed;city.hit({x:corner.x,z:corner.z,radius:100,strength:1000});assert.equal(corner.health,0);assert.equal(city.destroyed,before+1);assert.equal(city.buildings[0].health,100);
+ const ray=city.collision.sweep({x:9500,y:100,z:9500},{x:0,y:0,z:0},0);assert.ok(ray===null||Number.isFinite(ray.t));
+ assert.ok(city.group.children.filter(o=>o.name==='real-terrain').every(o=>o.geometry.attributes.position.count<1500000));city.dispose();
+});
+test('indexed roof geometry has upward faces and does not fill courtyard holes',()=>{
+ const {city,dispose}=setup(),b=city.buildings.find(b=>b.footprint.length===2),geometry=footprintGeometry({...b,rings:b.footprint},b.triangles),p=geometry.attributes.position,n=geometry.attributes.normal,idx=geometry.index.array;
+ let area=0;for(let i=0;i<idx.length;i+=3){const[a,c,d]=[idx[i],idx[i+1],idx[i+2]];if(n.getY(a)!==1)continue;const ax=p.getX(c)-p.getX(a),az=p.getZ(c)-p.getZ(a),bx=p.getX(d)-p.getX(a),bz=p.getZ(d)-p.getZ(a);assert.ok(az*bx-ax*bz>0);area+=(az*bx-ax*bz)*b.width*b.depth/2;}
+ assert.ok(Math.abs(area-(110*110-50*50))<.01);geometry.dispose();dispose();
+});
 
 test('projection keeps metres, east to +X and north to -Z; height fallbacks are deterministic',()=>{
   assert.deepEqual(project(37,55,37,55),[0,0]); assert.ok(Math.abs(project(37,55.001,37,55)[1]+111.32)<.001);

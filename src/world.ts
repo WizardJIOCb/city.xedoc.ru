@@ -5,6 +5,7 @@ import { basinDepth, SEA_LEVEL, type Basin } from './local-water';
 import { CELL, generateLayout, seededRandom, blastDamage, blastImpulse, islandRadius } from './model.js';
 import { buildRealWorld, FootprintBatch, moveOnRoute, type Route } from './real-world';
 import { inPolygon, type Polygon, type Point, type RealMap } from './real-geometry';
+import { SurfaceIndex } from './surface-index';
 
 const dummy = new T.Object3D();
 const white = new T.Color();
@@ -16,11 +17,22 @@ export class Batch {
     this.mesh = new T.InstancedMesh(geometry, material, capacity); this.mesh.count = 0; this.mesh.castShadow = shadow; this.mesh.receiveShadow = true; this.mesh.frustumCulled = false; this.mesh.instanceMatrix.setUsage(T.DynamicDrawUsage); group.add(this.mesh);
   }
   add(x: number, y: number, z: number, sx: number, sy: number, sz: number, color: T.ColorRepresentation, ry = 0) {
+    if (this.used >= this.originalY.length) this.grow();
     const id = this.used++; this.set(id, x, y, z, sx, sy, sz, ry); this.mesh.setColorAt(id, white.set(color)); if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true; this.mesh.count = this.used; return id;
   }
   set(id: number, x: number, y: number, z: number, sx: number, sy: number, sz: number, ry = 0, rx = 0, rz = 0, grounded = true) {
     this.originalY[id] = y; this.grounded[id] = grounded ? 1 : 0;
     dummy.position.set(x, y + (grounded ? this.groundOffset?.(x, z) ?? 0 : 0), z); dummy.scale.set(sx, sy, sz); dummy.rotation.set(rx, ry, rz); dummy.updateMatrix(); this.mesh.setMatrixAt(id, dummy.matrix); this.mesh.instanceMatrix.needsUpdate = true;
+  }
+  private grow() {
+    const capacity = this.originalY.length * 2;
+    const y = new Float32Array(capacity); y.set(this.originalY); this.originalY = y;
+    const grounded = new Uint8Array(capacity); grounded.set(this.grounded); this.grounded = grounded;
+    const previous = this.mesh, next = new T.InstancedMesh(previous.geometry, previous.material, capacity);
+    next.instanceMatrix.array.set(previous.instanceMatrix.array); next.instanceMatrix.setUsage(T.DynamicDrawUsage);
+    if (previous.instanceColor) { next.instanceColor = new T.InstancedBufferAttribute(new Float32Array(capacity * 3), 3); next.instanceColor.array.set(previous.instanceColor.array); }
+    next.count = previous.count; next.castShadow = previous.castShadow; next.receiveShadow = previous.receiveShadow; next.frustumCulled = false;
+    previous.parent?.add(next); previous.removeFromParent(); previous.dispose(); this.mesh = next;
   }
   hide(id: number) { this.set(id, 0, -200, 0, 0, 0, 0, 0, 0, 0, false); }
   refreshGround() {
@@ -41,6 +53,7 @@ export class City {
   group = new T.Group(); buildings: Building[] = []; trees: { x: number; z: number; id: number; trunk: number; alive: boolean; health?: number }[] = [];
   layout: ReturnType<typeof generateLayout>; extent: number; rng: () => number;
   solid: Batch; facade: Batch; foliage: Batch; cars: Batch; cabins: Batch; people: Batch; heads: Batch;
+  paving?: Batch;
   traffic: Citizen[] = []; pedestrians: Citizen[] = []; planes: T.Group[] = []; ships: T.Group[] = [];
   night = { value: 0 }; damage = 0; destroyed = 0; population: number; affected = 0; vehiclesLost = 0;
   onCollapse: (b: Building) => void = () => {}; onFire: (b: Building) => void = () => {};
@@ -61,6 +74,7 @@ export class City {
   onHit: (hit: Hit) => void = () => {};
   fireClock = 0; miniMapDirty = true;
   realBatch?: FootprintBatch;
+  private realSurface?: SurfaceIndex;
   constructor(public scene: T.Scene, public seed = 'NEW-HAVEN', public size = 18, public style = 'bay', public realMap?: RealMap) {
     this.rng = seededRandom(seed + ':details'); this.layout = realMap ? { seed, size, style, buildings: [], blocks: [], parks: [] } : generateLayout(seed, size, style); this.extent = realMap ? realMap.size / 2 : size * CELL / 2;
     const box = new T.BoxGeometry(1, 1, 1), standard = new T.MeshStandardMaterial({ roughness: .85, metalness: .05 });
@@ -76,6 +90,7 @@ export class City {
         vec2 cell = vec2(u/3.05, vBuilding.y/3.6);
         vec2 f = fract(cell);
         float windowMask = step(.17,f.x)*step(f.x,.83)*step(.2,f.y)*step(f.y,.77)*side;
+        windowMask *= 1.0-smoothstep(.25,1.5,max(fwidth(cell.x),fwidth(cell.y)));
         float lit = step(.48,fract(sin(dot(floor(cell),vec2(12.9898,78.233)))*43758.5453));
         vec3 glass = mix(vec3(.025,.065,.085),vec3(.12,.24,.29), .5+.5*sin(vBuilding.y*.014+u*.001));
         diffuseColor.rgb = mix(diffuseColor.rgb, glass, windowMask*.82);
@@ -84,13 +99,15 @@ export class City {
       `);
     };
     this.solid = new Batch(this.group, box, standard, 45000);
+    if (realMap) this.paving = new Batch(this.group, new T.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), standard, Math.max(45000, realMap.roads.reduce((n, road) => n + road.points.length * 2, 0)), false);
     this.facade = new Batch(this.group, box, facadeMat, 12000);
     this.foliage = new Batch(this.group, new T.IcosahedronGeometry(1, 1), new T.MeshStandardMaterial({ roughness: .97 }), 6000);
     this.cars = new Batch(this.group, box, new T.MeshStandardMaterial({ roughness: .4, metalness: .3 }), 400);
     this.cabins = new Batch(this.group, box, new T.MeshStandardMaterial({ color: '#7196a7', roughness: .2, metalness: .55 }), 400);
     this.people = new Batch(this.group, box, standard, 700, false); this.heads = new Batch(this.group, new T.IcosahedronGeometry(.3, 0), standard, 700, false);
     for (const batch of this.groundBatches) batch.groundOffset = (x, z) => this.groundOffset(x, z);
-    this.generate(); this.collision = new CollisionWorld(this); this.worldRadius = this.extent + (realMap ? 220 : 1350); this.population = this.buildings.length * 43 + this.traffic.length * 2;
+    if (realMap) this.realSurface = new SurfaceIndex(realMap.land);
+    this.generate(); this.collision = new CollisionWorld(this); this.worldRadius = realMap ? Math.SQRT2 * this.extent + 220 : this.extent + 1350; this.population = this.buildings.length * 43 + this.traffic.length * 2;
     scene.add(this.group);
   }
   generate() {
@@ -145,7 +162,7 @@ export class City {
       }
       this.buildings.push(b);
     }
-  get groundBatches() { return [this.solid, this.facade, this.foliage, this.cars, this.cabins, this.people, this.heads]; }
+  get groundBatches() { return [this.solid, this.facade, this.foliage, this.cars, this.cabins, this.people, this.heads, ...(this.paving ? [this.paving] : [])]; }
   groundOffset(x: number, z: number): number {
     if (!this.basins.length) return 0;
     const key = `${Math.floor(x / CELL)},${Math.floor(z / CELL)}`;
@@ -184,7 +201,7 @@ export class City {
   }
   baseTerrainHeight(x: number, z: number): number | null {
     for (const dock of this.dockCells.get(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`) ?? []) if (dock.alive && this.onDock(dock, x, z)) return dock.y + dock.height / 2;
-    if (this.realMap) return this.realMap.land.some(polygon => inPolygon(x, z, polygon)) ? .7 : null;
+    if (this.realSurface) return this.realSurface.contains(x, z) ? .7 : null;
     for (const r of this.terrainRects) if (Math.abs(x - r.x) <= r.width / 2 && Math.abs(z - r.z) <= r.depth / 2) return r.y;
     if (this.landCells.has(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`)) return .7;
     for (const island of this.islands) if (Math.hypot(x - island.x, z - island.z) < islandRadius(Math.atan2(z - island.z, x - island.x), island.radius, island.phase)) return .7;
@@ -348,7 +365,7 @@ export class City {
       object.health = Math.max(0, (object.health ?? 100) - blastDamage(distance, hit.radius, hit.strength, resistance));
       return object.health <= 0;
     };
-    for (const b of this.buildings) {
+    for (const b of this.collision.nearby(hit.x, hit.z, hit.radius)) {
       if (b.collapsed || b.health <= 0) continue;
       const d = Math.max(0, Math.hypot(b.x - hit.x, b.z - hit.z) - b.width * .45);
       if (!reached(d)) continue;
@@ -421,7 +438,7 @@ export class City {
       for (const b of this.buildings) if (b.fire > 0) {
         b.fire -= .1; this.onFire(b);
         if (!b.collapsed && b.health > 0) { const before = b.health; b.health = Math.max(0, b.health - .267); this.damage += before - b.health; if (b.health === 0) this.startCollapse(b); }
-        if (this.rng() < .0078) { const other = this.buildings.find(n => n !== b && !n.collapsed && n.fire <= 0 && Math.hypot(n.x - b.x, n.z - b.z) < 35); if (other) other.fire = 8; }
+        if (this.rng() < .0078) { const other = this.collision.nearby(b.x, b.z, 35).find(n => n !== b && !n.collapsed && n.fire <= 0 && Math.hypot(n.x - b.x, n.z - b.z) < 35); if (other) other.fire = 8; }
       }
       this.affected = Math.min(this.population, Math.round(this.damage / 100 * 43) + this.vehiclesLost * 2);
     }

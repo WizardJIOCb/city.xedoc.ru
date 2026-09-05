@@ -8,6 +8,34 @@ export function shapeOf(rings: Polygon, x = 0, z = 0, sx = 1, sz = 1) {
   const shape = new T.Shape(points(rings[0])); shape.holes = rings.slice(1).map(r => new T.Path(points(r))); return shape;
 }
 
+// Share roof vertices and index the walls instead of expanding each triangle.
+// This keeps full OSM contours and courtyards affordable on regional maps.
+export function footprintGeometry(spec: RealBuilding, triangles: Point[][]) {
+  const positions: number[] = [], normals: number[] = [], indices: number[] = [];
+  const roof = new Map<string, number>();
+  const vertex = (p: Point, y: number, nx: number, ny: number, nz: number) => {
+    const id = positions.length / 3; positions.push((p[0] - spec.x) / spec.width, y, (p[1] - spec.z) / spec.depth); normals.push(nx, ny, nz); return id;
+  };
+  for (const tri of triangles) {
+    const ids = tri.map(p => { const key = `${p[0]},${p[1]}`; if (!roof.has(key)) roof.set(key, vertex(p, .5, 0, 1, 0)); return roof.get(key)!; });
+    const [a, b, c] = tri;
+    if ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) > 0) ids.reverse();
+    indices.push(...ids);
+  }
+  spec.rings.forEach((ring, ri) => {
+    const signed = ring.reduce((sum, p, i) => { const q = ring[(i + 1) % ring.length]; return sum + p[0] * q[1] - q[0] * p[1]; }, 0);
+    const direction = Math.sign(signed) * (ri ? -1 : 1);
+    for (let i = 1; i < ring.length; i++) {
+      let a = ring[i - 1], b = ring[i]; if (direction < 0) [a, b] = [b, a];
+      const dx = (b[0] - a[0]) / spec.width, dz = (b[1] - a[1]) / spec.depth, length = Math.hypot(dx, dz); if (length < 1e-8) continue;
+      const nx = dz / length, nz = -dx / length, v = vertex(a, -.5, nx, 0, nz);
+      vertex(a, .5, nx, 0, nz); vertex(b, .5, nx, 0, nz); vertex(b, -.5, nx, 0, nz);
+      indices.push(v, v + 1, v + 2, v, v + 2, v + 3);
+    }
+  });
+  return new T.BufferGeometry().setAttribute('position', new T.Float32BufferAttribute(positions, 3)).setAttribute('normal', new T.Float32BufferAttribute(normals, 3)).setIndex(indices);
+}
+
 export class FootprintBatch {
   mesh: T.BatchedMesh;
   private matrix = new T.Matrix4(); private transform = new T.Object3D();
@@ -16,13 +44,12 @@ export class FootprintBatch {
     const source = city.facade.mesh.material as T.MeshStandardMaterial, material = source.clone();
     material.onBeforeCompile = (shader, renderer) => { source.onBeforeCompile(shader, renderer); shader.vertexShader = shader.vertexShader.replaceAll('instanceMatrix * vec4(position,1.0)', 'batchingMatrix * vec4(position,1.0)'); };
     material.customProgramCacheKey = () => 'osm-facades-v1';
-    const vertices = buildings.reduce((n, b) => n + b.rings.reduce((m, ring) => m + ring.length, 0) * 18, 100);
-    this.mesh = new T.BatchedMesh(Math.max(1, buildings.length), vertices, 0, material);
+    const points = buildings.reduce((n, b) => n + b.rings.reduce((m, ring) => m + ring.length, 0), 20);
+    this.mesh = new T.BatchedMesh(Math.max(1, buildings.length), points * 5, points * 12, material);
     this.mesh.castShadow = this.mesh.receiveShadow = true; this.mesh.frustumCulled = false; this.mesh.sortObjects = false; city.group.add(this.mesh);
   }
-  add(spec: RealBuilding, color: T.Color) {
-    const geometry = new T.ExtrudeGeometry(shapeOf(spec.rings, spec.x, spec.z, spec.width, spec.depth), { depth: 1, bevelEnabled: false, steps: 1, curveSegments: 1 });
-    geometry.rotateX(-Math.PI / 2); geometry.translate(0, -.5, 0);
+  add(spec: RealBuilding, color: T.Color, triangles: Point[][]) {
+    const geometry = footprintGeometry(spec, triangles);
     const id = this.mesh.addInstance(this.mesh.addGeometry(geometry)); geometry.dispose();
     this.set(id, spec.x, spec.height / 2 + .8, spec.z, spec.width, spec.height, spec.depth); this.color(id, color); return id;
   }
@@ -64,7 +91,7 @@ function surface(city: City, polygons: Polygon[], height: number, color: string,
   // Interior vertices let a local flood lower the middle of a large OSM polygon.
   const split = (a: T.Vector3, b: T.Vector3, c: T.Vector3) => {
     const lengths = [a.distanceToSquared(b), b.distanceToSquared(c), c.distanceToSquared(a)], longest = Math.max(...lengths);
-    if (longest <= 32 * 32) { vertices.push(...a.toArray(), ...b.toArray(), ...c.toArray()); return; }
+    if (longest <= Math.max(32, city.extent / 64) ** 2) { vertices.push(...a.toArray(), ...b.toArray(), ...c.toArray()); return; }
     const i = lengths.indexOf(longest), p = [a, b, c][i], q = [b, c, a][i], r = [c, a, b][i], middle = p.clone().add(q).multiplyScalar(.5);
     split(p, middle, r); split(middle, q, r);
   };
@@ -82,7 +109,7 @@ export function buildRealWorld(city: City, map: RealMap) {
     const b: Building = { ...spec, color, hue, centrality: 0, roof: 0, health: 100, fire: 0, collapsed: false, collapse: 0, parts: [], tiltX: .06, tiltZ: -.04, footprint: spec.rings };
     const contour = spec.rings[0].slice(0, -1).map(p => new T.Vector2(...p)), holes = spec.rings.slice(1).map(r => r.slice(0, -1).map(p => new T.Vector2(...p)));
     const points = [...contour, ...holes.flat()]; b.triangles = T.ShapeUtils.triangulateShape(contour, holes).map(face => face.map(i => [points[i].x, points[i].y] as Point));
-    const id = city.realBatch.add(spec, color); b.parts.push({ batch: city.realBatch, id, x: b.x, y: b.height / 2 + .8, z: b.z, sx: b.width, sy: b.height, sz: b.depth }); city.buildings.push(b);
+    const id = city.realBatch.add(spec, color, b.triangles); b.parts.push({ batch: city.realBatch, id, x: b.x, y: b.height / 2 + .8, z: b.z, sx: b.width, sy: b.height, sz: b.depth }); city.buildings.push(b);
   }
   const roadRoutes: { route: Route; drive: boolean; width: number }[] = [];
   for (const road of map.roads) {
@@ -99,9 +126,9 @@ export function buildRealWorld(city: City, map: RealMap) {
           if (road.drive) dock.ids.push(city.solid.add(x, 1.115, z, .28, .02, Math.min(4.2, length / count), '#d3d0b5', angle));
         }
         continue;
-      } else city.solid.add((a[0] + b[0]) / 2, .77, (a[1] + b[1]) / 2, road.width + 2, .08, length + .3, '#b7b4a4', angle);
-      city.solid.add((a[0] + b[0]) / 2, road.bridge ? 1.06 : .83, (a[1] + b[1]) / 2, road.width, .08, length + .3, road.drive ? '#435157' : '#bcb89e', angle);
-      if (road.drive) for (let d = 6; d < length - 2 && city.solid.used < 36000; d += 13) city.solid.add(a[0] + (b[0] - a[0]) * d / length, road.bridge ? 1.115 : .885, a[1] + (b[1] - a[1]) * d / length, .28, .02, 4.2, '#d3d0b5', angle);
+      } else city.paving!.add((a[0] + b[0]) / 2, .77, (a[1] + b[1]) / 2, road.width + 2, .08, length + .3, '#b7b4a4', angle);
+      city.paving!.add((a[0] + b[0]) / 2, road.bridge ? 1.06 : .83, (a[1] + b[1]) / 2, road.width, .08, length + .3, road.drive ? '#435157' : '#bcb89e', angle);
+      if (road.drive && map.size <= 3000) for (let d = 6; d < length - 2 && city.paving!.used < 36000; d += 13) city.paving!.add(a[0] + (b[0] - a[0]) * d / length, road.bridge ? 1.115 : .885, a[1] + (b[1] - a[1]) * d / length, .28, .02, 4.2, '#d3d0b5', angle);
     }
   }
   for (const point of map.trees.slice(0, 1600)) if (map.land.some(p => inPolygon(...point, p))) city.tree(...point, 2.5 + city.rng() * 2);
