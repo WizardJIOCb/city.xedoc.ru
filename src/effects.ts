@@ -364,10 +364,14 @@ export class Effects {
     if (this.city.planes.includes(object)) this.city.destroyPlane(object, hit); else this.city.destroyShip(object, hit, true);
     delete object.userData.gravityWell; delete object.userData.captureVelocity; delete object.userData.captureAge;
   }
-  private updateUfo(event: Event, time: number) {
+  private updateUfo(event: Event, dt: number, time: number) {
     event.group.rotation.y = event.age * .12;
     event.group.children.forEach((craft, i) => { craft.position.set(Math.cos(event.age * .28 + i * 2.094) * 75, 142 + Math.sin(time + i) * 8, Math.sin(event.age * .28 + i * 2.094) * 75); });
-    if (event.tick > .55) {
+    const points: T.Vector3[] = event.data.beamPoints ??= event.group.children.map(craft => {
+      const point = craft.getWorldPosition(new T.Vector3()); point.y = Math.max(SEA_LEVEL, this.city.terrainHeight(point.x, point.z) ?? SEA_LEVEL) + 1; return point;
+    });
+    const pulse = event.tick > .55;
+    if (pulse) {
       event.tick = 0;
       const candidates: { source: object; position: T.Vector3; priority: number }[] = [];
       const add = (source: object, x: number, y: number, z: number, priority: number) => { if (Math.hypot(x - event.x, z - event.z) < 120 * Math.sqrt(event.power)) candidates.push({ source, position: new T.Vector3(x, y, z), priority }); };
@@ -381,16 +385,22 @@ export class Effects {
         const target = candidates.filter(c => !used.has(c.source)).sort((a, b) => a.priority - b.priority || a.position.distanceToSquared(world) - b.position.distanceToSquared(world))[0];
         if (target) used.add(target.source);
         const point = target?.position ?? new T.Vector3(world.x, 0, world.z); event.data.beamTargets.push(point);
-        this.city.hit({ x: point.x, z: point.z, radius: 34 * Math.sqrt(event.power), strength: 28 * event.power, fire: true, column: { bottom: Math.min(-25, point.y - 12), top: Math.max(point.y, world.y) + 20 } });
-        for (let i = 0; i < 5; i++) this.fire.emit(point.x, point.y + 2, point.z, (Math.random() - .5) * 10, 15, (Math.random() - .5) * 10, 5, .6, '#a9ffca');
       }
     }
     event.group.children.forEach((craft, i) => {
-      const point = (event.data.beamTargets as T.Vector3[] | undefined)?.[i]; if (!point) return;
+      const point = points[i], destination = (event.data.beamTargets as T.Vector3[] | undefined)?.[i];
+      // Keep the current endpoint across target changes. Exponential damping
+      // gives the same sweep at different frame rates and a smooth approach.
+      if (destination) point.lerp(destination, -Math.expm1(-6 * dt));
       const local = craft.worldToLocal(point.clone()), beam = craft.children[2] as T.Mesh;
       beam.position.copy(local).multiplyScalar(.5); beam.scale.set(1.4, local.length() / 135, 1.4);
       beam.quaternion.setFromUnitVectors(new T.Vector3(0, 1, 0), local.clone().normalize().negate());
       (beam.material as T.MeshBasicMaterial).opacity = .15 + Math.sin(time * 18) * .04;
+      if (pulse) {
+        const world = craft.getWorldPosition(new T.Vector3());
+        this.city.hit({ x: point.x, z: point.z, radius: 34 * Math.sqrt(event.power), strength: 28 * event.power, fire: true, column: { bottom: Math.min(-25, point.y - 12), top: Math.max(point.y, world.y) + 20 } });
+        for (let k = 0; k < 5; k++) this.fire.emit(point.x, point.y + 2, point.z, (Math.random() - .5) * 10, 15, (Math.random() - .5) * 10, 5, .6, '#a9ffca');
+      }
     });
   }
   update(dt: number, time: number) {
@@ -435,7 +445,7 @@ export class Effects {
         if (e.tick > .2) { e.tick = 0; this.city.hit({ x: e.x, z: e.z, radius: 110 * Math.sqrt(p), strength: 19 * p, column: { bottom: -25, top: 240 * Math.sqrt(p) } }); for (let i = 0; i < 6; i++) { const a = Math.random() * 6.28, h = Math.random() * 140; this.smoke.emit(e.x + Math.cos(a) * (12 + h * .2), h, e.z + Math.sin(a) * (12 + h * .2), -Math.sin(a) * 45, 22, Math.cos(a) * 45, 18, 1.4, '#5a6568'); } }
         for (const d of [...this.debris, ...this.wrecks, ...this.bodies]) if (d && !d.removed && !d.submerged && Math.hypot(d.x - e.x, d.z - e.z) < 140 * Math.sqrt(p)) { const dx = d.x - e.x, dz = d.z - e.z; d.vx += (-dx * .7 - dz * 1.7 - d.vx * .65) * dt; d.vz += (-dz * .7 + dx * 1.7 - d.vz * .65) * dt; d.vy += (85 - d.y * .34 - d.vy * .8) * dt; d.resting = false; }
       } else if (e.type === 'ufo') {
-        this.updateUfo(e, time);
+        this.updateUfo(e, dt, time);
       } else if (e.type === 'tsunami') {
         const plan = e.data.plan as WavePlan; (e.group.children[0] as TsunamiWave).update(t, this.city.night.value);
         const surface = (x: number, z: number) => SEA_LEVEL + waveHeight(plan, t, x, z);
