@@ -43,7 +43,7 @@ export class CollisionWorld {
       for (let z = Math.floor((Math.min(from.z, to.z) - radius) / 64); z <= Math.floor((Math.max(from.z, to.z) + radius) / 64); z++) for (const b of this.cells.get(`${x},${z}`) ?? []) candidates.add(b);
     }
     for (const b of candidates) {
-      const height = b.health <= 0 ? (b.collapsed ? 3 : 0) : b.height * (b.height > 50 && b.roof > .32 ? 1.28 : 1) + 1;
+      const height = b.health <= 0 ? (b.collapsed && this.city.terrainHeight(b.x, b.z) !== null ? 3 : 0) : b.height * (b.height > 50 && b.roof > .32 ? 1.28 : 1) + 1;
       if (!height) continue;
       const offset = this.city.groundOffset(b.x, b.z);
       const hit = sweepBox(from, to, { x: b.x - b.width / 2 - radius, y: .6 + offset - radius, z: b.z - b.depth / 2 - radius }, { x: b.x + b.width / 2 + radius, y: height + offset + radius, z: b.z + b.depth / 2 + radius });

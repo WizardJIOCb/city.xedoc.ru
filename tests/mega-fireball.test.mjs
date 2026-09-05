@@ -6,6 +6,23 @@ import { City } from '../src/world.ts';
 import { Effects } from '../src/effects.ts';
 import { Sound } from '../src/audio.ts';
 
+test('quadruple-power mega blast expands the damaging front and fireball to 440, with bounded debris and a completed lifecycle', () => {
+  for (const power of [2, 4]) {
+    const scene = new Scene(), city = new City(scene, 'NUKE-POWER', 14), fx = new Effects(scene, city, new Sound());
+    city.buildings = []; city.traffic = []; city.pedestrians = []; city.trees = []; city.props = []; city.planes = []; city.ships = [];
+    city.addBuilding({ x: 370, z: 0, width: 16, depth: 16, height: 12, hue: .4, roof: 0, centrality: 0 });
+    const target = city.buildings.at(-1);
+    fx.power = power; fx.trigger('nuke', 0, 0); fx.update(1.5, 1.5);
+    const radius = 220 * Math.sqrt(power);
+    assert.equal(fx.events.find(e => e.type === 'ring').data.radius, radius);
+    assert.equal(fx.events.find(e => e.type === 'fireball').group.children[0].blastRadius, radius);
+    for (let t = 1.55; t <= 18; t += .05) { city.update(.05, t); fx.update(.05, t); }
+    assert.equal(target.health, power === 4 ? 0 : 100); assert.equal(fx.events.length, 0);
+    assert.ok(fx.debris.length <= 2200); assert.ok(fx.debris.every(d => Number.isFinite(d.y)));
+    fx.reset(); city.dispose();
+  }
+});
+
 test('fireball proxy contributes no solid box to the SSAO override pass', () => {
   const scene = new Scene(), camera = new PerspectiveCamera(43, 1, 1, 8500), mesh = new MegaFireball(220);
   scene.add(mesh); mesh.update(2); camera.position.set(800, 650, 1000); camera.lookAt(mesh.position); camera.updateMatrixWorld(); scene.updateMatrixWorld(true);

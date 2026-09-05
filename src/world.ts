@@ -34,7 +34,7 @@ export type Building = { x: number; z: number; width: number; depth: number; hei
 export type Citizen = { x: number; z: number; axis: boolean; start: number; end: number; speed: number; id: number; extra: number; alive: boolean; phase: number; health?: number; };
 export type Island = { x: number; z: number; radius: number; phase: number; name: string; dock: T.Vector3 };
 export type Hit = { x: number; z: number; radius: number; strength: number; fire?: boolean; impulse?: boolean; column?: { bottom: number; top: number }; groundOnly?: boolean; flow?: { x: number; z: number }; waveId?: number; front?: { previous: number; current: number }; };
-export type DockSection = { x: number; y: number; z: number; width: number; depth: number; height: number; rotation: number; ids: number[]; health: number; alive: boolean };
+export type DockSection = { x: number; y: number; z: number; width: number; depth: number; height: number; rotation: number; ids: number[]; health: number; alive: boolean; kind: 'dock' | 'airport'; supports?: Building };
 export class City {
   group = new T.Group(); buildings: Building[] = []; trees: { x: number; z: number; id: number; trunk: number; alive: boolean; health?: number }[] = [];
   layout: ReturnType<typeof generateLayout>; extent: number; rng: () => number;
@@ -53,7 +53,7 @@ export class City {
   onDockDestroyed: (dock: DockSection, hit: Hit) => void = () => {};
   onCarFlooded: (car: Citizen, flow?: { x: number; z: number }) => void = () => {};
   onCarLifted: (car: Citizen, hit: Hit) => void = () => {};
-  docks: DockSection[] = []; basins: Basin[] = []; private groundCache = new Map<string, number>();
+  docks: DockSection[] = []; airportSections: DockSection[] = []; airportBuildings: Building[] = []; basins: Basin[] = []; private groundCache = new Map<string, number>();
   private dockCells = new Map<string, DockSection[]>();
   waterLevelAt: (x: number, z: number) => number = () => SEA_LEVEL;
   onHit: (hit: Hit) => void = () => {};
@@ -119,7 +119,6 @@ export class City {
     // Promenade, piers and protective seawall.
     for (let x = -e * .65; x < e * .68; x += 20) { const dock = this.addDock(x, 1.3, e + 14, 20, 3.3, 9, '#b7ae93'); dock.ids.push(this.solid.add(x, 2.1, e + 18.5, 20, 1, .6, '#c5bfa8')); }
     for (let k = 0; k < 4; k++) this.createPlane(k);
-    this.terrainRects.push({ x: e + 70, z: -70, width: 100, depth: 420, y: 1.5 });
     if (this.style === 'islands') for (const z of [-124, 124]) this.terrainRects.push({ x: 0, z, width: 200, depth: 12, y: 4.5 });
     this.createIslands();
   }
@@ -228,9 +227,9 @@ export class City {
     ship.userData.alive = false; if (shatter) ship.visible = false;
     this.onShipDestroyed(ship, hit); this.miniMapDirty = true;
   }
-  addDock(x: number, y: number, z: number, width: number, height: number, depth: number, color: T.ColorRepresentation, rotation = 0) {
-    const dock: DockSection = { x, y, z, width, height, depth, rotation, health: 100, alive: true, ids: [this.solid.add(x, y, z, width, height, depth, color, rotation)] };
-    this.docks.push(dock);
+  addDock(x: number, y: number, z: number, width: number, height: number, depth: number, color: T.ColorRepresentation, rotation = 0, kind: DockSection['kind'] = 'dock') {
+    const dock: DockSection = { x, y, z, width, height, depth, rotation, kind, health: 100, alive: true, ids: [this.solid.add(x, y, z, width, height, depth, color, rotation)] };
+    (kind === 'airport' ? this.airportSections : this.docks).push(dock);
     const halfX = (Math.abs(Math.cos(rotation)) * width + Math.abs(Math.sin(rotation)) * depth) / 2;
     const halfZ = (Math.abs(Math.sin(rotation)) * width + Math.abs(Math.cos(rotation)) * depth) / 2;
     for (let cx = Math.floor((x - halfX) / CELL); cx <= Math.floor((x + halfX) / CELL); cx++) for (let cz = Math.floor((z - halfZ) / CELL); cz <= Math.floor((z + halfZ) / CELL); cz++) {
@@ -247,6 +246,7 @@ export class City {
     if (dock.health > 0) return;
     dock.alive = false; this.onDockDestroyed(dock, hit);
     for (const id of dock.ids) this.solid.hide(id);
+    if (dock.supports) this.damageBuilding(dock.supports, 100, hit.fire, hit);
     this.miniMapDirty = true;
   }
   part(b: Building, batch: Batch, x: number, y: number, z: number, sx: number, sy: number, sz: number, color: T.ColorRepresentation) { const id = batch.add(x, y, z, sx, sy, sz, color); b.parts.push({ batch, id, x, y, z, sx, sy, sz }); }
@@ -289,10 +289,36 @@ export class City {
   }
   airport() {
     const e = this.extent;
-    this.solid.add(e + 70, -2, -70, 100, 7, 420, '#657b68'); this.solid.add(e + 76, 1.6, -70, 33, .3, 360, '#3e4d52');
-    for (let z = -225; z < 90; z += 24) this.solid.add(e + 76, 1.79, z, 1.2, .06, 10, '#e0ddc7');
-    this.solid.add(e + 20, 5, -80, 38, 12, 76, '#8ca0a1'); this.solid.add(e + 22, 21, -24, 7, 37, 7, '#bcbcaf'); this.solid.add(e + 22, 38, -24, 13, 8, 13, '#608a99');
-    this.solid.add(e - 5, 1.7, 70, 65, 3, 15, '#7e8b89');
+    // Each tile owns its ground, pavement and markings; no unbreakable slab or
+    // collision rectangle remains underneath a bombed-out part of the runway.
+    const tiles: DockSection[][] = [];
+    for (let row = 0; row < 14; row++) {
+      tiles[row] = [];
+      for (let col = 0; col < 4; col++) {
+        const x = e + 32.5 + col * 25, z = -265 + row * 30;
+        const tile = this.addDock(x, -2, z, 25, 7, 30, '#657b68', 0, 'airport'); tiles[row][col] = tile;
+        const roadLeft = Math.max(x - 12.5, e + 59.5), roadRight = Math.min(x + 12.5, e + 92.5);
+        if (row > 0 && row < 13 && roadRight > roadLeft) tile.ids.push(this.solid.add((roadLeft + roadRight) / 2, 1.6, z, roadRight - roadLeft, .3, 30, '#3e4d52'));
+      }
+    }
+    for (let z = -225; z < 90; z += 24) {
+      // Split a stripe at tile boundaries so it cannot float across a crater.
+      for (let row = 1; row < 13; row++) {
+        const lo = Math.max(z - 5, -280 + row * 30), hi = Math.min(z + 5, -250 + row * 30);
+        if (hi > lo) tiles[row][2].ids.push(this.solid.add(e + 76, 1.79, (lo + hi) / 2, 1.2, .06, hi - lo, '#e0ddc7'));
+      }
+    }
+    const structure = (x: number, z: number, width: number, height: number, depth: number, color: string) => {
+      const building: Building = { x, z, width, height, depth, hue: .4, centrality: 0, roof: 0, health: 100, fire: 0, collapsed: false, collapse: 0, parts: [], color: new T.Color(color), tiltX: .05, tiltZ: -.06 };
+      this.buildings.push(building); this.airportBuildings.push(building);
+      const foundation = this.addDock(x, -2, z, width, 7, depth, '#7e8b89', 0, 'airport'); foundation.supports = building;
+      return building;
+    };
+    const terminal = structure(e + 20, -80, 38, 12, 76, '#8ca0a1');
+    this.part(terminal, this.solid, terminal.x, 7.5, terminal.z, 38, 12, 76, terminal.color);
+    const tower = structure(e + 22, -24, 13, 42, 13, '#608a99');
+    this.part(tower, this.solid, tower.x, 21, tower.z, 7, 37, 7, '#bcbcaf'); this.part(tower, this.solid, tower.x, 38, tower.z, 13, 8, 13, tower.color);
+    for (let i = 0; i < 5; i++) this.addDock(e - 31 + i * 13, 1.7, 70, 13, 3, 15, '#7e8b89', 0, 'airport');
   }
   createPlane(index: number) {
     const g = new T.Group(), m = new T.MeshStandardMaterial({ color: '#e1dfd0', metalness: .25, roughness: .4 }), accent = new T.MeshStandardMaterial({ color: '#e28b63' });
@@ -325,7 +351,7 @@ export class City {
     }
     for (const p of this.pedestrians) if (p.alive && reached(Math.hypot(p.x - hit.x, p.z - hit.z)) && hit.strength > 10) { p.alive = false; this.onDeath(p, hit); }
     for (const p of this.props) if (p.alive && damageObject(p, Math.hypot(p.x - hit.x, p.z - hit.z), .6)) { p.alive = false; for (const id of p.ids) this.solid.hide(id); this.onWreck(p.x, p.y, p.z, '#7c8581', hit); }
-    for (const dock of this.docks) if (dock.alive) { const distance = Math.max(0, Math.hypot(dock.x - hit.x, dock.z - hit.z) - Math.min(dock.width, dock.depth) * .4); if (reached(distance)) this.damageDock(dock, blastDamage(distance, hit.radius, hit.strength, .65), hit); }
+    for (const dock of [...this.docks, ...this.airportSections]) if (dock.alive) { const distance = Math.max(0, Math.hypot(dock.x - hit.x, dock.z - hit.z) - Math.min(dock.width, dock.depth) * .4); if (reached(distance)) this.damageDock(dock, blastDamage(distance, hit.radius, hit.strength, .65), hit); }
     for (const plane of this.planes) if (plane.userData.alive && !plane.userData.gravityWell && !hit.groundOnly) {
       if (hit.column && (plane.position.y < hit.column.bottom || plane.position.y > hit.column.top)) continue;
       const distance = Math.hypot(plane.position.x - hit.x, hit.column ? 0 : plane.position.y * .5, plane.position.z - hit.z);
@@ -361,7 +387,7 @@ export class City {
     for (const p of this.pedestrians) if (p.alive && depth(p.x, p.z) > 1.3) { p.alive = false; this.people.hide(p.id); this.heads.hide(p.extra); }
     for (const c of this.traffic) if (c.alive && depth(c.x, c.z) > 1.1) { c.alive = false; this.vehiclesLost++; this.cars.color(c.id, '#3c5254'); this.cabins.hide(c.extra); this.onCarFlooded(c, flow); }
     for (const tree of this.trees) if (tree.alive && depth(tree.x, tree.z) > (flow ? 3 : 8)) { tree.alive = false; this.foliage.hide(tree.id); this.solid.hide(tree.trunk); this.onWreck(tree.x, 4, tree.z, '#617449'); }
-    for (const dock of this.docks) if (dock.alive && depth(dock.x, dock.z) > 1) this.damageDock(dock, dt * strength, { x: dock.x, z: dock.z, radius: 70, strength: 120, flow, impulse: !!flow });
+    for (const dock of [...this.docks, ...this.airportSections]) if (dock.alive && depth(dock.x, dock.z) > 1) this.damageDock(dock, dt * strength, { x: dock.x, z: dock.z, radius: 70, strength: 120, flow, impulse: !!flow });
     if (flow) for (const ship of this.ships) if (ship.userData.alive && surface(ship.position.x, ship.position.z) > ship.position.y + 6) this.destroyShip(ship, { x: ship.position.x, z: ship.position.z, radius: 90, strength: 130, flow, impulse: true });
     for (const plane of this.planes) if (plane.userData.alive && surface(plane.position.x, plane.position.z) > plane.position.y + 2) this.destroyPlane(plane, { x: plane.position.x, z: plane.position.z, radius: 60, strength: 160, flow, impulse: !!flow });
     this.miniMapDirty = true;
@@ -373,9 +399,10 @@ export class City {
       if (b.collapse > 0 && !b.collapsed) {
         b.collapse += dt * .65; const t = b.collapse;
         for (const part of b.parts) part.batch.set(part.id, part.x + b.tiltZ * part.y * t * 2, Math.max(.4, part.y - t * t * b.height * .6), part.z + b.tiltX * part.y * t * 2, part.sx, part.sy * Math.max(.05, 1 - t * .65), part.sz, 0, b.tiltX * t, b.tiltZ * t);
-        if (t > 1.25) { b.collapsed = true; for (const part of b.parts) part.batch.hide(part.id); const base = b.parts[0]; base.batch.set(base.id, b.x, 1.4, b.z, b.width * 1.03, 2.8, b.depth * 1.03, 0, .025, .03); base.batch.color(base.id, '#545550'); }
+        if (t > 1.25) { b.collapsed = true; for (const part of b.parts) part.batch.hide(part.id); if (this.terrainHeight(b.x, b.z) !== null) { const base = b.parts[0]; base.batch.set(base.id, b.x, 1.4, b.z, b.width * 1.03, 2.8, b.depth * 1.03, 0, .025, .03); base.batch.color(base.id, '#545550'); } }
       }
     }
+    for (const b of this.airportBuildings) if (b.collapsed && this.terrainHeight(b.x, b.z) === null) for (const part of b.parts) part.batch.hide(part.id);
     this.fireClock += dt;
     if (this.fireClock > .1) {
       this.fireClock = 0;
