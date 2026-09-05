@@ -34,6 +34,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Activation failed; inspect the remote output.' }
     $live = Invoke-RestMethod -Uri "https://city.xedoc.ru/version.json?release=$releaseId" -TimeoutSec 20
     if ($live.commit -ne $releaseId) { throw 'Public HTTPS release verification failed.' }
+    $geo = Invoke-RestMethod -Uri 'https://city.xedoc.ru/api/geo/health' -TimeoutSec 15
+    if (-not $geo.ok) { throw 'Public map API verification failed.' }
     Write-Host "Live: https://city.xedoc.ru/ ($releaseId)"
 } finally {
     Pop-Location

@@ -3,6 +3,8 @@ import { CollisionWorld } from './physics';
 import { createIslandTerrain } from './island-terrain';
 import { basinDepth, SEA_LEVEL, type Basin } from './local-water';
 import { CELL, generateLayout, seededRandom, blastDamage, blastImpulse, islandRadius } from './model.js';
+import { buildRealWorld, FootprintBatch, moveOnRoute, type Route } from './real-world';
+import { inPolygon, type Polygon, type Point, type RealMap } from './real-geometry';
 
 const dummy = new T.Object3D();
 const white = new T.Color();
@@ -29,9 +31,9 @@ export class Batch {
   }
   color(id: number, c: T.ColorRepresentation) { this.mesh.setColorAt(id, white.set(c)); if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true; }
 }
-type Part = { batch: Batch; id: number; x: number; y: number; z: number; sx: number; sy: number; sz: number };
-export type Building = { x: number; z: number; width: number; depth: number; height: number; hue: number; centrality: number; roof: number; health: number; fire: number; collapsed: boolean; collapse: number; parts: Part[]; color: T.Color; tiltX: number; tiltZ: number; blast?: Hit; };
-export type Citizen = { x: number; z: number; axis: boolean; start: number; end: number; speed: number; id: number; extra: number; alive: boolean; phase: number; health?: number; };
+type Part = { batch: Pick<Batch, 'set' | 'hide' | 'color'>; id: number; x: number; y: number; z: number; sx: number; sy: number; sz: number };
+export type Building = { x: number; z: number; width: number; depth: number; height: number; hue: number; centrality: number; roof: number; health: number; fire: number; collapsed: boolean; collapse: number; parts: Part[]; color: T.Color; tiltX: number; tiltZ: number; blast?: Hit; footprint?: Polygon; triangles?: Point[][] };
+export type Citizen = { x: number; z: number; axis: boolean; start: number; end: number; speed: number; id: number; extra: number; alive: boolean; phase: number; health?: number; route?: Route; progress?: number; heading?: number };
 export type Island = { x: number; z: number; radius: number; phase: number; name: string; dock: T.Vector3 };
 export type Hit = { x: number; z: number; radius: number; strength: number; fire?: boolean; impulse?: boolean; column?: { bottom: number; top: number }; groundOnly?: boolean; flow?: { x: number; z: number }; waveId?: number; front?: { previous: number; current: number }; };
 export type DockSection = { x: number; y: number; z: number; width: number; depth: number; height: number; rotation: number; ids: number[]; health: number; alive: boolean; kind: 'dock' | 'airport'; supports?: Building };
@@ -58,8 +60,9 @@ export class City {
   waterLevelAt: (x: number, z: number) => number = () => SEA_LEVEL;
   onHit: (hit: Hit) => void = () => {};
   fireClock = 0; miniMapDirty = true;
-  constructor(public scene: T.Scene, public seed = 'NEW-HAVEN', public size = 18, public style = 'bay') {
-    this.rng = seededRandom(seed + ':details'); this.layout = generateLayout(seed, size, style); this.extent = size * CELL / 2;
+  realBatch?: FootprintBatch;
+  constructor(public scene: T.Scene, public seed = 'NEW-HAVEN', public size = 18, public style = 'bay', public realMap?: RealMap) {
+    this.rng = seededRandom(seed + ':details'); this.layout = realMap ? { seed, size, style, buildings: [], blocks: [], parks: [] } : generateLayout(seed, size, style); this.extent = realMap ? realMap.size / 2 : size * CELL / 2;
     const box = new T.BoxGeometry(1, 1, 1), standard = new T.MeshStandardMaterial({ roughness: .85, metalness: .05 });
     const facadeMat = new T.MeshStandardMaterial({ roughness: .48, metalness: .18 });
     facadeMat.onBeforeCompile = shader => {
@@ -87,10 +90,11 @@ export class City {
     this.cabins = new Batch(this.group, box, new T.MeshStandardMaterial({ color: '#7196a7', roughness: .2, metalness: .55 }), 400);
     this.people = new Batch(this.group, box, standard, 700, false); this.heads = new Batch(this.group, new T.IcosahedronGeometry(.3, 0), standard, 700, false);
     for (const batch of this.groundBatches) batch.groundOffset = (x, z) => this.groundOffset(x, z);
-    this.generate(); this.collision = new CollisionWorld(this); this.worldRadius = this.extent + 1350; this.population = this.buildings.length * 43 + this.traffic.length * 2;
+    this.generate(); this.collision = new CollisionWorld(this); this.worldRadius = this.extent + (realMap ? 220 : 1350); this.population = this.buildings.length * 43 + this.traffic.length * 2;
     scene.add(this.group);
   }
   generate() {
+    if (this.realMap) { buildRealWorld(this, this.realMap); return; }
     const r = this.rng, e = this.extent;
     for (const block of this.layout.blocks) {
       const { x, z, park } = block; this.landCells.add(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`);
@@ -155,9 +159,16 @@ export class City {
   }
   refreshGround() {
     this.groundCache.clear();
+    this.realBatch?.refreshGround();
     for (const batch of this.groundBatches) batch.refreshGround();
     this.group.traverse(object => {
-      if (!(object instanceof T.Mesh) || object.name !== 'island-terrain') return;
+      if (!(object instanceof T.Mesh)) return;
+      if (object.name === 'real-terrain') {
+        const original = object.userData.originalTerrain, positions = object.geometry.attributes.position;
+        for (let i = 0; i < positions.count; i++) positions.setY(i, original[i * 3 + 1] + this.groundOffset(positions.getX(i), positions.getZ(i)));
+        positions.needsUpdate = true; object.geometry.computeVertexNormals(); object.geometry.computeBoundingSphere(); return;
+      }
+      if (object.name !== 'island-terrain') return;
       const affected = this.basins.some(b => Math.hypot(b.x - object.position.x, b.z - object.position.z) < b.radius + object.userData.terrainRadius);
       if (!affected && !object.userData.subsidedTerrain) return;
       object.userData.subsidedTerrain = affected;
@@ -173,6 +184,7 @@ export class City {
   }
   baseTerrainHeight(x: number, z: number): number | null {
     for (const dock of this.dockCells.get(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`) ?? []) if (dock.alive && this.onDock(dock, x, z)) return dock.y + dock.height / 2;
+    if (this.realMap) return this.realMap.land.some(polygon => inPolygon(x, z, polygon)) ? .7 : null;
     for (const r of this.terrainRects) if (Math.abs(x - r.x) <= r.width / 2 && Math.abs(z - r.z) <= r.depth / 2) return r.y;
     if (this.landCells.has(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`)) return .7;
     for (const island of this.islands) if (Math.hypot(x - island.x, z - island.z) < islandRadius(Math.atan2(z - island.z, x - island.x), island.radius, island.phase)) return .7;
@@ -413,8 +425,8 @@ export class City {
       }
       this.affected = Math.min(this.population, Math.round(this.damage / 100 * 43) + this.vehiclesLost * 2);
     }
-    for (const c of this.traffic) if (c.alive) { if (c.axis) c.x += c.speed * dt; else c.z += c.speed * dt; const p = c.axis ? c.x : c.z; if (p > c.end || p < c.start) { if (c.axis) c.x = c.speed > 0 ? c.start : c.end; else c.z = c.speed > 0 ? c.start : c.end; } this.cars.set(c.id, c.x, .96, c.z, 2.1, 1.05, 4.5, c.axis ? Math.PI / 2 : 0); this.cabins.set(c.extra, c.x, 1.72, c.z, 1.8, .75, 2.2, c.axis ? Math.PI / 2 : 0); }
-    for (const p of this.pedestrians) if (p.alive) { const panic = this.destroyed > 0 ? 2.6 : 1; if (p.axis) p.x += p.speed * dt * panic; else p.z += p.speed * dt * panic; const pos = p.axis ? p.x : p.z; if (pos > p.end || pos < p.start) p.speed *= -1; const bob = Math.sin(time * 9 + p.phase) * .065; this.people.set(p.id, p.x, 1.3 + bob, p.z, .6, 1.05, .5); this.heads.set(p.extra, p.x, 2.05 + bob, p.z, 1, 1, 1); }
+    for (const c of this.traffic) if (c.alive) { if (c.route) moveOnRoute(c, dt); else if (c.axis) c.x += c.speed * dt; else c.z += c.speed * dt; const p = c.axis ? c.x : c.z; if (!c.route && (p > c.end || p < c.start)) { if (c.axis) c.x = c.speed > 0 ? c.start : c.end; else c.z = c.speed > 0 ? c.start : c.end; } this.cars.set(c.id, c.x, this.realMap ? (this.baseTerrainHeight(c.x, c.z) ?? .7) + .7 : .96, c.z, 2.1, 1.05, 4.5, c.heading ?? (c.axis ? Math.PI / 2 : 0)); this.cabins.set(c.extra, c.x, this.realMap ? (this.baseTerrainHeight(c.x, c.z) ?? .7) + 1.46 : 1.72, c.z, 1.8, .75, 2.2, c.heading ?? (c.axis ? Math.PI / 2 : 0)); }
+    for (const p of this.pedestrians) if (p.alive) { const panic = this.destroyed > 0 ? 2.6 : 1; if (p.route) moveOnRoute(p, dt * panic); else if (p.axis) p.x += p.speed * dt * panic; else p.z += p.speed * dt * panic; const pos = p.axis ? p.x : p.z; if (!p.route && (pos > p.end || pos < p.start)) p.speed *= -1; const bob = Math.sin(time * 9 + p.phase) * .065; this.people.set(p.id, p.x, 1.3 + bob, p.z, .6, 1.05, .5); this.heads.set(p.extra, p.x, 2.05 + bob, p.z, 1, 1, 1); }
     for (const plane of this.planes) {
       if (plane.userData.gravityWell) continue;
       if (plane.userData.falling) { plane.position.y -= dt * 65; plane.position.x += dt * 25; plane.rotation.z += dt * 1.2; if (plane.position.y < 0) { plane.visible = false; plane.userData.falling = false; this.onWreck(plane.position.x, 4, plane.position.z, '#4a5458'); } }
@@ -427,9 +439,9 @@ export class City {
         ship.position.copy(curve.getPointAt(T.MathUtils.clamp(t, 0, 1))); const tangent = curve.getTangentAt(T.MathUtils.clamp(t, .001, .999)); ship.rotation.y = Math.atan2(-tangent.x * direction, -tangent.z * direction);
       } else ship.position.x = Math.sin(time * .006) * this.extent * .65; ship.position.y = -1 + Math.sin(time * .8) * .35; ship.rotation.z = Math.sin(time * .6) * .018; }
   }
-  get percent() { return Math.min(100, this.damage / (this.buildings.length * 100) * 100); }
+  get percent() { return Math.min(100, this.damage / Math.max(1, this.buildings.length * 100) * 100); }
   dispose() {
     this.scene.remove(this.group); const geometries = new Set<T.BufferGeometry>(), materials = new Set<T.Material>();
-    this.group.traverse(o => { if (o instanceof T.Mesh) { geometries.add(o.geometry); for (const m of Array.isArray(o.material) ? o.material : [o.material]) materials.add(m); if (o instanceof T.InstancedMesh) o.dispose(); } }); geometries.forEach(g => g.dispose()); materials.forEach(m => m.dispose());
+    this.group.traverse(o => { if (o instanceof T.Mesh) { geometries.add(o.geometry); for (const m of Array.isArray(o.material) ? o.material : [o.material]) materials.add(m); if (o instanceof T.InstancedMesh || o instanceof T.BatchedMesh) o.dispose(); } }); geometries.forEach(g => g.dispose()); materials.forEach(m => m.dispose());
   }
 }

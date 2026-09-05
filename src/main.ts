@@ -15,6 +15,7 @@ import { Squads, TEAMS } from './squads';
 import { DISASTERS, Effects, type DisasterId } from './effects';
 import { Sound } from './audio';
 import { SelfDestruct } from './self-destruct';
+import type { RealMap } from './real-geometry';
 import { buildUI, el, icon, selectCard } from './ui';
 import './style.css';
 import '@fontsource/manrope/400.css';
@@ -71,7 +72,7 @@ function setPower(value: number) {
   target.scale.setScalar(DISASTERS.find(d => d.id === selected)!.radius * Math.sqrt(effects.power));
 }
 function setSelected(id: DisasterId) { selected = id; setPower(effects.power); waveArrow.visible = id === 'tsunami'; el('squad-options').hidden = !id.startsWith('squad_'); el('action-hint').innerHTML = icon('pointer') + (id.startsWith('squad_') ? '<span>Выберите команду. <b>Нажмите на сушу для высадки.</b></span>' : id === 'flood' ? '<span><b>Нажмите на участок:</b> земля просядет и затопится.</span>' : id === 'tsunami' ? '<span><b>Нажмите на зону.</b> Волна пройдёт по стрелке внутри круга.</span>' : '<span>Выберите катастрофу. <b>Нажмите на город.</b></span>'); selectCard(id); const d = DISASTERS.find(d => d.id === id)!; const color = new T.Color(d.color); (targetRing.material as T.MeshBasicMaterial).color.copy(color); (innerRing.material as T.MeshBasicMaterial).color.copy(color); sound.select(); }
-function pointAt(x: number, y: number) { const r = canvas.getBoundingClientRect(); pointer.set((x - r.left) / r.width * 2 - 1, -(y - r.top) / r.height * 2 + 1); raycaster.setFromCamera(pointer, camera); aimedPlane = null; const air = raycaster.intersectObjects(city.planes.filter(p => p.userData.alive), true); if (air.length) { let parent = air[0].object; while (parent.parent && !city.planes.includes(parent as T.Group)) parent = parent.parent; aimedPlane = parent as T.Group; hitPoint.copy(air[0].point); return hitPoint; } const hits = raycaster.intersectObject(city.facade.mesh); if (hits.length) { hitPoint.copy(hits[0].point); hitPoint.y = .8; return hitPoint; } return raycaster.ray.intersectPlane(ground, hitPoint); }
+function pointAt(x: number, y: number) { const r = canvas.getBoundingClientRect(); pointer.set((x - r.left) / r.width * 2 - 1, -(y - r.top) / r.height * 2 + 1); raycaster.setFromCamera(pointer, camera); aimedPlane = null; const air = raycaster.intersectObjects(city.planes.filter(p => p.userData.alive), true); if (air.length) { let parent = air[0].object; while (parent.parent && !city.planes.includes(parent as T.Group)) parent = parent.parent; aimedPlane = parent as T.Group; hitPoint.copy(air[0].point); return hitPoint; } const hits = raycaster.intersectObjects(city.realBatch ? [city.facade.mesh, city.realBatch.mesh] : [city.facade.mesh]); if (hits.length) { hitPoint.copy(hits[0].point); hitPoint.y = .8; return hitPoint; } return raycaster.ray.intersectPlane(ground, hitPoint); }
 const down = { pointerId: -1, x: 0, y: 0, time: 0, dragged: false, threshold: 7 }; const touches = new Set<number>(); let gesture = false;
 function clearPointer() { down.pointerId = -1; down.dragged = false; canvas.classList.remove('dragging'); }
 canvas.addEventListener('pointermove', e => {
@@ -114,6 +115,12 @@ el('pause').onclick = () => pause();
 for (const b of document.querySelectorAll<HTMLElement>('[data-speed]')) b.onclick = () => { speed = Number(b.dataset.speed); pause(false); for (const p of document.querySelectorAll('[data-speed]')) p.classList.toggle('active', p === b); };
 el('sound').onclick = () => { sound.unlock(); sound.enabled = !sound.enabled; el('sound').innerHTML = icon(sound.enabled ? 'volume' : 'mute'); el('sound').setAttribute('aria-label', sound.enabled ? 'Выключить звук' : 'Включить звук'); saveSettings(); };
 el('help').onclick = () => el<HTMLDialogElement>('help-dialog').showModal(); el('maps').onclick = () => { pendingPreset = preset; el<HTMLDialogElement>('map-dialog').showModal(); }; el('settings').onclick = () => el<HTMLDialogElement>('settings-dialog').showModal();
+let realPicker: import('./real-place-picker').RealPlacePicker | undefined;
+el('real-maps').onclick = async () => {
+  el<HTMLDialogElement>('map-dialog').close(); el<HTMLDialogElement>('real-map-dialog').showModal();
+  try { const { RealPlacePicker } = await import('./real-place-picker'); if (!el<HTMLDialogElement>('real-map-dialog').open) return; realPicker ??= new RealPlacePicker(map => regenerate(`OSM:${map.lat},${map.lon}:${map.size}`, Math.ceil(map.size / 62), 'real', map)); realPicker.open(); }
+  catch { el('real-map-message').textContent = 'Не удалось открыть карту. Обновите страницу и попробуйте ещё раз.'; }
+};
 el('fullscreen').onclick = async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); } catch { toast('Полный экран недоступен', 'Разверните окно браузера вручную', 'expand'); } };
 el('camera-home').onclick = () => homeCamera();
 function updateSelfDestructHUD() {
@@ -143,20 +150,24 @@ el('self-destruct-stop').onclick = stopSelfDestruct; el('self-destruct-stop-dial
 selfDestruct.onComplete = () => { updateSelfDestructHUD(); toast('Город полностью уничтожен', 'Самоуничтожение завершено. Можно восстановить город.', 'city'); };
 function toggleCinematic() { cinematic = !cinematic; document.body.classList.toggle('cinematic', cinematic); controls.autoRotate = cinematic; controls.autoRotateSpeed = .28; target.visible = targetCross.visible = false; resize(); }
 el('cinematic').onclick = toggleCinematic; el('exit-cinematic').onclick = toggleCinematic;
-function setDay(mode: number) { dayMode = mode; nightTarget = mode === 2 ? 1 : mode === 1 ? .38 : 0; el('daytime').innerHTML = icon(mode === 2 ? 'moon' : 'sun'); const desc = preset === 'islands' ? 'Островной город' : 'Прибрежный мегаполис'; el('city-subtitle').innerHTML = `${desc} <span>•</span> ${['Золотой час', 'Сумерки', 'Ночной город'][mode]}`; }
+function setDay(mode: number) { dayMode = mode; nightTarget = mode === 2 ? 1 : mode === 1 ? .38 : 0; el('daytime').innerHTML = icon(mode === 2 ? 'moon' : 'sun'); const desc = city.realMap ? `Реальная карта · ${city.realMap.size / 1000} км` : preset === 'islands' ? 'Островной город' : 'Прибрежный мегаполис'; el('city-subtitle').innerHTML = `${desc} <span>•</span> ${['Золотой час', 'Сумерки', 'Ночной город'][mode]}`; }
 el('daytime').onclick = () => setDay((dayMode + 1) % 3);
 for (const b of document.querySelectorAll<HTMLElement>('[data-preset]')) b.onclick = () => { pendingPreset = b.dataset.preset!; for (const p of document.querySelectorAll('[data-preset]')) p.classList.toggle('chosen', p === b); el<HTMLInputElement>('seed').value = { bay: 'NEW-HAVEN', islands: 'ARCHIPELAGO', night: 'NEON-CITY' }[pendingPreset] ?? 'NEW-HAVEN'; };
 el('random-seed').onclick = () => { el<HTMLInputElement>('seed').value = `CC-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36).toUpperCase()}`; };
-async function regenerate(seed: string, size: number, style: string) {
-  if (generating) return; generating = true; el('loading').style.display = 'flex'; el('loading').style.opacity = '1';
+async function regenerate(seed: string, size: number, style: string, realMap?: RealMap) {
+  if (generating) return false; generating = true; el('loading').style.display = 'flex'; el('loading').style.opacity = '1';
   await new Promise<void>(r => requestAnimationFrame(() => requestAnimationFrame(() => r())));
   try {
-    selfDestruct.cancel(); effects.reset(); city.dispose(); city = new City(scene, seed, size, style === 'islands' ? 'islands' : 'bay'); effects.attachCity(city); squads.reset(city); selfDestruct.reset(city); simTime = 0; preset = style; homeCamera(); setDay(style === 'night' ? 2 : 0); pause(false); updateHUD(); drawMinimap();
+    const nextCity = new City(scene, seed, size, realMap ? 'real' : style === 'islands' ? 'islands' : 'bay', realMap);
+    selfDestruct.cancel(); effects.reset(); city.dispose(); city = nextCity; effects.attachCity(city); squads.reset(city); selfDestruct.reset(city); simTime = 0; preset = style; homeCamera(); setDay(style === 'night' ? 2 : 0); pause(false); updateHUD(); drawMinimap();
     el('city-name').textContent = style === 'islands' ? 'Архипелаг' : style === 'night' ? 'Неон-Сити' : seed === 'NEW-HAVEN' ? 'Нью-Хейвен' : 'Новый горизонт'; el('seed-label').textContent = 'SEED: ' + seed; toast('Город готов', `${city.buildings.length.toLocaleString('ru')} зданий. Чистый лист.`, 'city');
-  } catch (e) { showError(String(e)); } finally { generating = false; el('loading').style.opacity = '0'; setTimeout(() => el('loading').style.display = 'none', 500); }
+    mountainGroup.visible = !realMap; document.body.classList.toggle('real-map-mode', !!realMap); el('map-credit').hidden = !realMap;
+    if (realMap) { el('city-name').textContent = realMap.name; el('seed-label').textContent = `${realMap.lat.toFixed(4)}, ${realMap.lon.toFixed(4)}`; regionMap = false; el('minimap-region').textContent = 'Регион'; toast('Реальное место готово', `${city.buildings.length} зданий · ${realMap.estimatedHeights} высот восстановлено процедурно`, 'map'); }
+    return true;
+  } catch (e) { toast('Не удалось построить город', String(e), 'map'); return false; } finally { generating = false; el('loading').style.opacity = '0'; setTimeout(() => el('loading').style.display = 'none', 500); }
 }
 el('generate').onclick = () => { const seed = el<HTMLInputElement>('seed').value.trim() || 'NEW-HAVEN'; const size = Number(el<HTMLSelectElement>('map-size').value); el<HTMLDialogElement>('map-dialog').close(); void regenerate(seed, size, pendingPreset); };
-el('rebuild').onclick = () => void regenerate(city.seed, city.size, preset);
+el('rebuild').onclick = () => void regenerate(city.seed, city.size, preset, city.realMap);
 window.addEventListener('keydown', e => {
   if (document.querySelector('dialog[open]') || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
   pressed.add(e.code);
@@ -190,6 +201,11 @@ function minimapScale() { return Math.min(mini.width, mini.height) / (regionMap 
 function drawMinimap() {
   const w = mini.width, h = mini.height, scale = minimapScale(), px = (x: number) => w / 2 + x * scale, pz = (z: number) => h / 2 + z * scale;
   mctx.fillStyle = '#18333b'; mctx.fillRect(0, 0, w, h);
+  if (city.realMap) {
+    for (const polygon of city.realMap.land) { mctx.fillStyle = '#748574'; mctx.beginPath(); for (const ring of polygon) { ring.forEach((p, i) => i ? mctx.lineTo(px(p[0]), pz(p[1])) : mctx.moveTo(px(p[0]), pz(p[1]))); mctx.closePath(); } mctx.fill('evenodd'); }
+    mctx.strokeStyle = '#3e5156'; mctx.lineWidth = 1;
+    for (const road of city.realMap.roads) { mctx.beginPath(); road.points.forEach((p, i) => i ? mctx.lineTo(px(p[0]), pz(p[1])) : mctx.moveTo(px(p[0]), pz(p[1]))); mctx.stroke(); }
+  }
   for (const island of city.islands) { mctx.fillStyle = '#688979'; mctx.beginPath(); mctx.arc(px(island.x), pz(island.z), island.radius * scale, 0, Math.PI * 2); mctx.fill(); }
   for (const ship of city.ships) if (ship.userData.alive) { mctx.fillStyle = '#e2d5b0'; mctx.fillRect(px(ship.position.x), pz(ship.position.z), 2, 2); }
   for (const block of city.layout.blocks) { mctx.fillStyle = block.park ? '#527965' : '#435e63'; mctx.fillRect(px(block.x - 26), pz(block.z - 26), 52 * scale, 52 * scale); }

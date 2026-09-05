@@ -21,4 +21,5 @@ jobs:
         with:
           name: crush-city-${{ github.sha }}
           path: dist/
+          include-hidden-files: true
           retention-days: 14

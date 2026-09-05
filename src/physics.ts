@@ -1,4 +1,5 @@
 import type { Building, City } from './world';
+import { inPolygon, type Point } from './real-geometry';
 
 export type Vec = { x: number; y: number; z: number };
 export type Motion = Vec & { vx: number; vy: number; vz: number; spin: number; resting?: boolean; submerged?: boolean; impactCooldown?: number; removed?: boolean; supportLevel?: number | null; supportBuilding?: Building };
@@ -24,12 +25,41 @@ export function sweepBox(from: Vec, to: Vec, min: Vec, max: Vec): { t: number; n
   return enter >= 0 && enter <= 1 && leave >= 0 && Math.abs(normal.x) + Math.abs(normal.y) + Math.abs(normal.z) > 0 ? { t: enter, normal } : null;
 }
 
+export function sweepPrism(from: Vec, to: Vec, triangle: Point[], bottom: number, top: number, radius: number) {
+  const [a, b, c] = triangle, sign = Math.sign((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
+  if (!sign) return null;
+  const planes = [{ x: 0, y: 1, z: 0, distance: top }, { x: 0, y: -1, z: 0, distance: -bottom }];
+  for (let i = 0; i < 3; i++) {
+    const p = triangle[i], q = triangle[(i + 1) % 3], length = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    const x = sign * (q[1] - p[1]) / length, z = -sign * (q[0] - p[0]) / length;
+    planes.push({ x, y: 0, z, distance: x * p[0] + z * p[1] });
+  }
+  let enter = 0, leave = 1, inside = true; let normal: Vec | null = null;
+  for (const plane of planes) {
+    const value = plane.x * from.x + plane.y * from.y + plane.z * from.z - plane.distance - radius;
+    if (value > 0) inside = false;
+    const delta = plane.x * (to.x - from.x) + plane.y * (to.y - from.y) + plane.z * (to.z - from.z);
+    if (Math.abs(delta) < 1e-9) { if (value > 0) return null; continue; }
+    const t = -value / delta;
+    if (delta < 0 && t >= enter) { enter = t; normal = { x: plane.x, y: plane.y, z: plane.z }; }
+    else if (delta > 0) leave = Math.min(leave, t);
+    if (enter > leave) return null;
+  }
+  return !inside && normal && enter >= 0 && enter <= 1 ? { t: enter, normal } : null;
+}
+
 export class CollisionWorld {
   private cells = new Map<string, Building[]>();
+  private triangleCells = new Map<string, { building: Building; triangle: Point[] }[]>();
   private source: Building[] = [];
   constructor(public city: City) { this.rebuild(); }
   rebuild() {
-    this.cells.clear(); this.source = this.city.buildings;
+    this.cells.clear(); this.triangleCells.clear(); this.source = this.city.buildings;
+    for (const building of this.source) for (const triangle of building.triangles ?? []) {
+      for (let x = Math.floor(Math.min(...triangle.map(p => p[0])) / 64); x <= Math.floor(Math.max(...triangle.map(p => p[0])) / 64); x++) for (let z = Math.floor(Math.min(...triangle.map(p => p[1])) / 64); z <= Math.floor(Math.max(...triangle.map(p => p[1])) / 64); z++) {
+        const key = `${x},${z}`, entries = this.triangleCells.get(key) ?? []; entries.push({ building, triangle }); this.triangleCells.set(key, entries);
+      }
+    }
     for (const b of this.source) for (let x = Math.floor((b.x - b.width / 2 - 5) / 64); x <= Math.floor((b.x + b.width / 2 + 5) / 64); x++) {
       for (let z = Math.floor((b.z - b.depth / 2 - 5) / 64); z <= Math.floor((b.z + b.depth / 2 + 5) / 64); z++) {
         const key = `${x},${z}`, list = this.cells.get(key) ?? []; list.push(b); this.cells.set(key, list);
@@ -38,15 +68,23 @@ export class CollisionWorld {
   }
   sweep(from: Vec, to: Vec, radius = .5): Contact | null {
     if (this.source !== this.city.buildings) this.rebuild();
-    const candidates = new Set<Building>(); let nearest: Contact | null = null;
+    const candidates = new Set<Building>(), triangles = new Map<Building, Set<Point[]>>(); let nearest: Contact | null = null;
     for (let x = Math.floor((Math.min(from.x, to.x) - radius) / 64); x <= Math.floor((Math.max(from.x, to.x) + radius) / 64); x++) {
-      for (let z = Math.floor((Math.min(from.z, to.z) - radius) / 64); z <= Math.floor((Math.max(from.z, to.z) + radius) / 64); z++) for (const b of this.cells.get(`${x},${z}`) ?? []) candidates.add(b);
+      for (let z = Math.floor((Math.min(from.z, to.z) - radius) / 64); z <= Math.floor((Math.max(from.z, to.z) + radius) / 64); z++) {
+        const key = `${x},${z}`; for (const b of this.cells.get(key) ?? []) candidates.add(b);
+        for (const entry of this.triangleCells.get(key) ?? []) { const local = triangles.get(entry.building) ?? new Set<Point[]>(); local.add(entry.triangle); triangles.set(entry.building, local); }
+      }
     }
     for (const b of candidates) {
       const height = b.health <= 0 ? (b.collapsed && this.city.terrainHeight(b.x, b.z) !== null ? 3 : 0) : b.height * (b.height > 50 && b.roof > .32 ? 1.28 : 1) + 1;
       if (!height) continue;
       const offset = this.city.groundOffset(b.x, b.z);
-      const hit = sweepBox(from, to, { x: b.x - b.width / 2 - radius, y: .6 + offset - radius, z: b.z - b.depth / 2 - radius }, { x: b.x + b.width / 2 + radius, y: height + offset + radius, z: b.z + b.depth / 2 + radius });
+      let hit = sweepBox(from, to, { x: b.x - b.width / 2 - radius, y: .6 + offset - radius, z: b.z - b.depth / 2 - radius }, { x: b.x + b.width / 2 + radius, y: height + offset + radius, z: b.z + b.depth / 2 + radius });
+      if (b.triangles) {
+        // The bounding box is only a broad phase: courtyards must stay open.
+        hit = null;
+        for (const triangle of triangles.get(b) ?? []) { const contact = sweepPrism(from, to, triangle, .6 + offset, height + offset, radius); if (contact && (!hit || contact.t < hit.t)) hit = contact; }
+      }
       if (hit && (!nearest || hit.t < nearest.t)) nearest = { ...hit, building: b };
     }
     return nearest;
@@ -56,7 +94,10 @@ export class CollisionWorld {
     if (floor === null || this.city.waterLevelAt(x, z) > floor + .6) return false;
     if (this.source !== this.city.buildings) this.rebuild();
     for (const b of this.cells.get(`${Math.floor(x / 64)},${Math.floor(z / 64)}`) ?? []) {
-      if (!b.collapsed && Math.abs(x - b.x) < b.width / 2 + clearance && Math.abs(z - b.z) < b.depth / 2 + clearance) return false;
+      if (!b.collapsed && Math.abs(x - b.x) < b.width / 2 + clearance && Math.abs(z - b.z) < b.depth / 2 + clearance) {
+        if (!b.footprint || inPolygon(x, z, b.footprint)) return false;
+        for (const ring of b.footprint) for (let i = 1; i < ring.length; i++) { const a = ring[i - 1], c = ring[i], dx = c[0] - a[0], dz = c[1] - a[1], t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / Math.max(.001, dx * dx + dz * dz))); if (Math.hypot(x - a[0] - t * dx, z - a[1] - t * dz) < clearance) return false; }
+      }
     }
     return true;
   }
