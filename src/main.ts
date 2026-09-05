@@ -14,6 +14,7 @@ import { SunRaysPass } from './sun-rays';
 import { Squads, TEAMS } from './squads';
 import { DISASTERS, Effects, type DisasterId } from './effects';
 import { Sound } from './audio';
+import { SelfDestruct } from './self-destruct';
 import { buildUI, el, icon, selectCard } from './ui';
 import './style.css';
 import '@fontsource/manrope/400.css';
@@ -54,6 +55,7 @@ const sunRays = new SunRaysPass(scene, camera); composer.addPass(sunRays);
 const bloom = new UnrealBloomPass(new T.Vector2(innerWidth, innerHeight), .25, .45, .91); composer.addPass(bloom); composer.addPass(new OutputPass());
 let city = new City(scene), sound = new Sound(), effects = new Effects(scene, city, sound);
 const squads = new Squads(scene, city, effects); effects.onDeploy = (kind, x, z) => squads.deploy(kind, x, z);
+const selfDestruct = new SelfDestruct(city, effects, () => squads.fighters.filter(unit => unit.alive));
 let aimedPlane: T.Group | null = null; let regionMap = false;
 let selected: DisasterId = 'meteor', speed = 1, paused = false, simTime = 0, night = 0, nightTarget = 0, dayMode = 0, cinematic = false, preset = 'bay', pendingPreset = 'bay', quality = 'high';
 let shakeEnabled = true, flashEnabled = true, sunEnabled = true, raysEnabled = true, toastTimer = 0, fpsFrames = 0, fpsTime = 0, hudClock = 0, mapClock = 0, generating = false, lastNow = performance.now();
@@ -114,6 +116,31 @@ el('sound').onclick = () => { sound.unlock(); sound.enabled = !sound.enabled; el
 el('help').onclick = () => el<HTMLDialogElement>('help-dialog').showModal(); el('maps').onclick = () => { pendingPreset = preset; el<HTMLDialogElement>('map-dialog').showModal(); }; el('settings').onclick = () => el<HTMLDialogElement>('settings-dialog').showModal();
 el('fullscreen').onclick = async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); } catch { toast('Полный экран недоступен', 'Разверните окно браузера вручную', 'expand'); } };
 el('camera-home').onclick = () => homeCamera();
+function updateSelfDestructHUD() {
+  const active = selfDestruct.active, button = el('self-destruct');
+  button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
+  el('self-destruct-status').hidden = !active;
+  const seconds = Math.ceil(selfDestruct.remaining);
+  el('self-destruct-countdown').textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  el('self-destruct-phase').textContent = paused ? 'На паузе' : selfDestruct.state === 'finishing' ? 'Добиваем уцелевшие объекты' : selfDestruct.finale ? 'Цепная детонация' : selfDestruct.lastTool || 'Случайные катастрофы';
+  el<HTMLProgressElement>('self-destruct-progress').value = Math.min(1, selfDestruct.elapsed / selfDestruct.duration);
+  el<HTMLFieldSetElement>('self-destruct-durations').disabled = active;
+  el('self-destruct-start').hidden = active; el('self-destruct-stop-dialog').hidden = !active;
+}
+el('self-destruct').onclick = () => { updateSelfDestructHUD(); el<HTMLDialogElement>('self-destruct-dialog').showModal(); };
+el('self-destruct-start').onclick = () => {
+  const duration = Number(document.querySelector<HTMLInputElement>('input[name="self-destruct-duration"]:checked')!.value);
+  el<HTMLDialogElement>('self-destruct-dialog').close();
+  if (selfDestruct.start(duration)) { sound.unlock(); pause(false); toast('Самоуничтожение запущено', `${duration} секунд симуляции. Катастрофы выбираются случайно.`, 'timer'); }
+  else toast('Город уже уничтожен', 'Восстановите город, чтобы запустить новый раунд.', 'city');
+  updateSelfDestructHUD();
+};
+function stopSelfDestruct() {
+  selfDestruct.cancel(); el<HTMLDialogElement>('self-destruct-dialog').close(); updateSelfDestructHUD();
+  toast('Самоуничтожение остановлено', 'Уже начавшиеся катастрофы продолжат действовать.', 'timer');
+}
+el('self-destruct-stop').onclick = stopSelfDestruct; el('self-destruct-stop-dialog').onclick = stopSelfDestruct;
+selfDestruct.onComplete = () => { updateSelfDestructHUD(); toast('Город полностью уничтожен', 'Самоуничтожение завершено. Можно восстановить город.', 'city'); };
 function toggleCinematic() { cinematic = !cinematic; document.body.classList.toggle('cinematic', cinematic); controls.autoRotate = cinematic; controls.autoRotateSpeed = .28; target.visible = targetCross.visible = false; resize(); }
 el('cinematic').onclick = toggleCinematic; el('exit-cinematic').onclick = toggleCinematic;
 function setDay(mode: number) { dayMode = mode; nightTarget = mode === 2 ? 1 : mode === 1 ? .38 : 0; el('daytime').innerHTML = icon(mode === 2 ? 'moon' : 'sun'); const desc = preset === 'islands' ? 'Островной город' : 'Прибрежный мегаполис'; el('city-subtitle').innerHTML = `${desc} <span>•</span> ${['Золотой час', 'Сумерки', 'Ночной город'][mode]}`; }
@@ -124,7 +151,7 @@ async function regenerate(seed: string, size: number, style: string) {
   if (generating) return; generating = true; el('loading').style.display = 'flex'; el('loading').style.opacity = '1';
   await new Promise<void>(r => requestAnimationFrame(() => requestAnimationFrame(() => r())));
   try {
-    effects.reset(); city.dispose(); city = new City(scene, seed, size, style === 'islands' ? 'islands' : 'bay'); effects.attachCity(city); squads.reset(city); simTime = 0; preset = style; homeCamera(); setDay(style === 'night' ? 2 : 0); pause(false); updateHUD(); drawMinimap();
+    selfDestruct.cancel(); effects.reset(); city.dispose(); city = new City(scene, seed, size, style === 'islands' ? 'islands' : 'bay'); effects.attachCity(city); squads.reset(city); selfDestruct.reset(city); simTime = 0; preset = style; homeCamera(); setDay(style === 'night' ? 2 : 0); pause(false); updateHUD(); drawMinimap();
     el('city-name').textContent = style === 'islands' ? 'Архипелаг' : style === 'night' ? 'Неон-Сити' : seed === 'NEW-HAVEN' ? 'Нью-Хейвен' : 'Новый горизонт'; el('seed-label').textContent = 'SEED: ' + seed; toast('Город готов', `${city.buildings.length.toLocaleString('ru')} зданий. Чистый лист.`, 'city');
   } catch (e) { showError(String(e)); } finally { generating = false; el('loading').style.opacity = '0'; setTimeout(() => el('loading').style.display = 'none', 500); }
 }
@@ -150,6 +177,7 @@ el('sound').innerHTML = icon(sound.enabled ? 'volume' : 'mute'); el('sound').set
 function resize() { camera.aspect = innerWidth / innerHeight; if (!cinematic) camera.setViewOffset(innerWidth, innerHeight, 0, Math.min(95, innerHeight * .12), innerWidth, innerHeight); else camera.clearViewOffset(); camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(innerWidth, innerHeight); effects.fire.material.uniforms.uScale.value = innerHeight; effects.smoke.material.uniforms.uScale.value = innerHeight; effects.blood.material.uniforms.uScale.value = innerHeight; effects.sprayWater.material.uniforms.uScale.value = innerHeight; }
 window.addEventListener('resize', resize); resize();
 function updateHUD() {
+  updateSelfDestructHUD();
   el('population').textContent = Math.max(0, city.population - city.affected).toLocaleString('ru'); el('buildings').textContent = (city.buildings.length - city.destroyed).toLocaleString('ru'); el('damage').innerHTML = city.percent.toFixed(1) + '<span>%</span>'; el('damage-fill').style.height = city.percent + '%';
   const n = effects.events.filter(e => !['ring', 'bolt', 'plume'].includes(e.type)).length;
   el('event-status').textContent = n ? `Активных катастроф: ${n}` : city.destroyed ? `Разрушено зданий: ${city.destroyed}` : 'В городе всё спокойно'; el('event-dot').style.background = n ? '#f6a36b' : '#a0d6a8';
@@ -177,7 +205,7 @@ if (diagnostics) { diagnostics.id = 'diagnostics'; diagnostics.style.cssText = '
 function frame(now: number) {
   requestAnimationFrame(frame); const elapsed = (now - lastNow) / 1000, rawDt = Math.min(elapsed, .08); lastNow = now; const dt = paused || generating || document.hidden ? 0 : rawDt * speed;
   if (!generating) {
-    simTime += dt; city.update(dt, simTime); squads.update(dt, simTime); effects.update(dt, simTime);
+    simTime += dt; city.update(dt, simTime); squads.update(dt, simTime); effects.update(dt, simTime); selfDestruct.update(dt);
     const advance = camera.position.distanceTo(controls.target) * rawDt * .55, forward = new T.Vector3(); camera.getWorldDirection(forward); forward.y = 0; forward.normalize(); const right = new T.Vector3().crossVectors(forward, camera.up).normalize(), move = new T.Vector3();
     if (pressed.has('KeyW') || pressed.has('ArrowUp')) move.addScaledVector(forward, advance); if (pressed.has('KeyS') || pressed.has('ArrowDown')) move.addScaledVector(forward, -advance); if (pressed.has('KeyD') || pressed.has('ArrowRight')) move.addScaledVector(right, advance); if (pressed.has('KeyA') || pressed.has('ArrowLeft')) move.addScaledVector(right, -advance);
     camera.position.add(move); controls.target.add(move); controls.target.x = T.MathUtils.clamp(controls.target.x, -city.worldRadius, city.worldRadius); controls.target.z = T.MathUtils.clamp(controls.target.z, -city.worldRadius, city.worldRadius); controls.update();
